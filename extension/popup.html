@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Browser Agent Demo</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <header>
+        <p class="eyebrow">SYSU Browser Agent</p>
+        <h1>浏览器辅助操作 Demo</h1>
+        <p class="hint">输入任务，先生成计划，再确认执行。</p>
+      </header>
+
+      <section class="examples">
+        <button data-example="搜索 多模态大模型">搜索主题</button>
+        <button data-example="填写 姓名=张三 邮箱=zhangsan@example.com 主题=多模态智能体 备注=这是课程 Demo">填写表单</button>
+        <button data-example="回复小明：我今晚八点前把材料发你">回复消息</button>
+        <button data-example="总结当前页面">页面总结</button>
+        <button data-example="提取页面链接和邮箱">结构化抽取</button>
+        <button data-example="比较这些浏览器智能体方案">结果比较</button>
+        <button data-example="分析这个界面能做什么">界面分析</button>
+        <button data-example="帮忙查找 browser harness">页面查找</button>
+        <button data-example="分析这个项目的可复用性">项目分析</button>
+        <button data-example="研究当前页面">研究简报</button>
+        <button data-example="分析这个 GitHub 仓库">Repo 分析</button>
+        <button data-example="在文档中找 安装 配置 API">文档检索</button>
+      </section>
+
+      <details class="settings">
+        <summary>LLM Planner 设置（可选）</summary>
+        <label class="check-row">
+          <input id="useLlm" type="checkbox" />
+          使用 OpenAI-compatible LLM 生成计划
+        </label>
+        <label class="input-label" for="apiBase">API Base</label>
+        <input id="apiBase" placeholder="https://api.openai.com/v1" />
+        <label class="input-label" for="apiKey">API Key</label>
+        <input id="apiKey" type="password" placeholder="sk-..." />
+        <label class="input-label" for="modelName">Model</label>
+        <input id="modelName" placeholder="gpt-4o-mini / qwen-vl-plus / ..." />
+        <button id="saveSettings" type="button">保存设置</button>
+      </details>
+
+      <label class="input-label" for="task">任务指令</label>
+      <textarea id="task" rows="4" placeholder="例如：搜索 多模态大模型"></textarea>
+
+      <div class="actions">
+        <button id="planBtn" class="primary">生成计划</button>
+        <button id="runBtn" disabled>执行计划</button>
+      </div>
+
+      <section class="status">
+        <h2>计划</h2>
+        <pre id="planOutput">尚未生成计划。</pre>
+      </section>
+
+      <section class="status">
+        <h2>执行日志</h2>
+        <pre id="logOutput">等待执行。</pre>
+      </section>
+    </main>
+
+    <script src="planner.js"></script>
+    <script src="model_planner.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

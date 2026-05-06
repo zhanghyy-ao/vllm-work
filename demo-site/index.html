@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Browser Agent Demo Site</title>
+    <style>
+      :root {
+        --ink: #1f2933;
+        --muted: #64748b;
+        --paper: #fff7ed;
+        --accent: #0f766e;
+        --accent-2: #ea580c;
+        --line: #d8c7aa;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 15% 0%, rgba(234, 88, 12, 0.22), transparent 28%),
+          radial-gradient(circle at 85% 8%, rgba(15, 118, 110, 0.22), transparent 30%),
+          #f6efe3;
+        font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+
+      header {
+        padding: 56px min(7vw, 80px) 24px;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 22px;
+        padding: 0 min(7vw, 80px) 64px;
+      }
+
+      h1 {
+        max-width: 880px;
+        margin: 0;
+        font-size: clamp(34px, 5vw, 62px);
+        line-height: 1.02;
+        letter-spacing: -0.04em;
+      }
+
+      .subtitle {
+        max-width: 760px;
+        color: var(--muted);
+        font-size: 18px;
+        line-height: 1.7;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        padding: 24px;
+        background: rgba(255, 247, 237, 0.82);
+        box-shadow: 0 24px 60px rgba(97, 63, 21, 0.12);
+      }
+
+      .card h2 {
+        margin: 0 0 16px;
+      }
+
+      label {
+        display: block;
+        margin: 12px 0 6px;
+        color: #344054;
+        font-weight: 700;
+      }
+
+      input,
+      textarea,
+      select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 12px 14px;
+        color: var(--ink);
+        background: #fffdf7;
+        font: inherit;
+      }
+
+      textarea {
+        min-height: 96px;
+        resize: vertical;
+      }
+
+      button,
+      a.button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        border: 0;
+        border-radius: 999px;
+        padding: 10px 18px;
+        color: #fff;
+        background: var(--accent);
+        font-weight: 800;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      .secondary {
+        background: var(--accent-2);
+      }
+
+      .results {
+        display: grid;
+        gap: 12px;
+        margin-top: 18px;
+      }
+
+      .result {
+        border: 1px dashed var(--line);
+        border-radius: 18px;
+        padding: 14px;
+        background: rgba(255, 255, 255, 0.48);
+      }
+
+      .result h3 {
+        margin: 0 0 8px;
+      }
+
+      .thread {
+        display: grid;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .bubble {
+        max-width: 86%;
+        border-radius: 18px;
+        padding: 12px 14px;
+        background: #fff;
+      }
+
+      .bubble.me {
+        justify-self: end;
+        color: #fff;
+        background: var(--accent);
+      }
+
+      .notice {
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      .wide {
+        grid-column: 1 / -1;
+      }
+
+      .agent-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 14px;
+      }
+
+      .mini-card {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 16px;
+        background: rgba(255, 255, 255, 0.55);
+      }
+
+      .mini-card h3 {
+        margin: 0 0 8px;
+      }
+
+      .price {
+        color: var(--accent-2);
+        font-size: 22px;
+        font-weight: 900;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        overflow: hidden;
+        border-radius: 14px;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid var(--line);
+        padding: 10px;
+        text-align: left;
+      }
+
+      th {
+        background: rgba(15, 118, 110, 0.1);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>浏览器辅助操作智能体测试站</h1>
+      <p class="subtitle">
+        这个页面用于验证插件 Demo：辅助搜索、表单填写、消息回复草稿。打开插件后可以直接使用三个示例指令。
+      </p>
+    </header>
+
+    <main>
+      <section class="card" aria-label="主题搜索">
+        <h2>辅助搜索</h2>
+        <form id="searchForm">
+          <label for="topicSearch">搜索主题</label>
+          <input id="topicSearch" name="q" type="search" placeholder="输入主题，例如 多模态大模型" />
+          <p>
+            <button type="submit" aria-label="搜索主题">搜索</button>
+          </p>
+        </form>
+        <div id="searchResults" class="results" aria-live="polite">
+          <article class="result" data-agent-result>
+            <h3>多模态大模型课程报告写作指南</h3>
+            <p>适合开题报告的结构包括任务定义、相关工作、系统方案、评测指标、算力预算和时间计划。</p>
+          </article>
+          <article class="result" data-agent-result>
+            <h3>浏览器智能体与 Web Agent</h3>
+            <p>浏览器 Agent 通常由页面观测、任务规划、动作执行、安全策略和轨迹评测组成。</p>
+          </article>
+          <article class="result" data-agent-result>
+            <h3>HarnessAgent 工程化思路</h3>
+            <p>Harness 层负责把真实浏览器封装成可观测、可执行、可回放的环境，让 Planner 专注决策。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="card" aria-label="表单填写">
+        <h2>课程 Demo 表单</h2>
+        <form id="profileForm">
+          <label for="name">姓名</label>
+          <input id="name" name="name" placeholder="请输入姓名" />
+
+          <label for="email">邮箱</label>
+          <input id="email" name="email" type="email" placeholder="请输入邮箱" />
+
+          <label for="topic">主题</label>
+          <input id="topic" name="topic" placeholder="请输入主题" />
+
+          <label for="note">备注</label>
+          <textarea id="note" name="note" placeholder="填写备注"></textarea>
+
+          <p>
+            <button type="submit" class="secondary" aria-label="提交表单">提交表单</button>
+          </p>
+        </form>
+        <p class="notice">安全策略：插件第一版只填写并高亮提交按钮，不自动提交表单。</p>
+      </section>
+
+      <section class="card" aria-label="消息回复">
+        <h2>消息回复</h2>
+        <div class="thread">
+          <div class="bubble">小明：今晚可以把多模态作业材料发我吗？</div>
+          <div class="bubble me">我：可以，我整理一下。</div>
+        </div>
+        <label for="replyBox">回复消息</label>
+        <textarea id="replyBox" name="message" aria-label="回复消息输入框" placeholder="输入回复内容"></textarea>
+        <p>
+          <button id="sendMessage" aria-label="发送消息">发送</button>
+        </p>
+        <p class="notice">安全策略：插件会生成回复草稿并高亮发送按钮，不自动点击发送。</p>
+      </section>
+
+      <section class="card wide" aria-label="浏览器智能体方案比较">
+        <h2>浏览器智能体方案库</h2>
+        <p class="notice">
+          这里模拟从网上搜集到的方案卡片，方便测试“提取链接”“收集邮箱”“比较方案”等能力。
+          项目联系人：agent-demo@sysu.example，课程邮箱：multimodal-course@example.com。
+        </p>
+        <div class="agent-grid">
+          <article class="mini-card" data-agent-card>
+            <h3><a href="https://github.com/MinorJerry/WebVoyager">WebVoyager</a></h3>
+            <p>端到端多模态网页 Agent，强调截图、Selenium 执行和轨迹评测。评分 4.4，适合论文复现与真实网页任务。</p>
+            <p class="price">¥0</p>
+          </article>
+          <article class="mini-card" data-agent-card>
+            <h3><a href="https://github.com/browser-use/browser-harness">Browser Harness</a></h3>
+            <p>轻量 CDP Harness，强调真实浏览器连接、domain skills 和可编辑执行工具。评分 4.7，适合工程化扩展。</p>
+            <p class="price">¥0</p>
+          </article>
+          <article class="mini-card" data-agent-card>
+            <h3><a href="https://github.com/nanobrowser/nanobrowser">Nanobrowser</a></h3>
+            <p>开源 Chrome 插件形态，包含 side panel、多 Agent 和多模型配置。评分 4.6，适合产品 Demo 参考。</p>
+            <p class="price">¥0</p>
+          </article>
+          <article class="mini-card" data-agent-card>
+            <h3><a href="https://playwright.dev/">Playwright Harness</a></h3>
+            <p>稳定浏览器自动化与端到端测试工具，可用于批量评测、截图和回放。评分 4.5，适合实验基线。</p>
+            <p class="price">¥0</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="card wide" aria-label="评测计划表">
+        <h2>评测计划表</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>功能</th>
+              <th>任务数</th>
+              <th>指标</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>辅助搜索</td>
+              <td>20</td>
+              <td>任务成功率、提取准确率</td>
+            </tr>
+            <tr>
+              <td>表单填写</td>
+              <td>20</td>
+              <td>字段匹配准确率、安全拦截次数</td>
+            </tr>
+            <tr>
+              <td>消息回复</td>
+              <td>10</td>
+              <td>草稿生成成功率、发送拦截率</td>
+            </tr>
+            <tr>
+              <td>结构化抽取与比较</td>
+              <td>10</td>
+              <td>JSON 完整性、比较可解释性</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+
+    <script>
+      document.getElementById("searchForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const query = document.getElementById("topicSearch").value.trim();
+        const results = document.getElementById("searchResults");
+        results.insertAdjacentHTML(
+          "afterbegin",
+          `<article class="result" data-agent-result>
+            <h3>${query || "未命名主题"}：自动搜索结果</h3>
+            <p>这是一条由本地测试站生成的结果，用来验证 Agent 是否完成搜索动作并能提取相关内容。</p>
+          </article>`
+        );
+      });
+
+      document.getElementById("profileForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        alert("Demo 表单已拦截提交：真实系统应在用户确认后再提交。");
+      });
+
+      document.getElementById("sendMessage").addEventListener("click", () => {
+        alert("Demo 消息已拦截发送：真实系统应在用户确认后再发送。");
+      });
+    </script>
+  </body>
+</html>
