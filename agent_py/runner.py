@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
 from .browser_runtime import PlaywrightBrowserRuntime
 from .llm_planner import LLMConfig, try_plan_with_llm
 from .memory import AgentMemory
+from .observer import observe_html
 from .planner import plan_task
 from .safety import sanitize_plan
 from .schema import ActionResult, ExecutionResult, Observation, Plan
 from .schema import Action
+from .workflow import BranchResult, build_workflow_controller, is_parallel_workflow_task
 
 
 @dataclass
@@ -27,6 +32,7 @@ class AgentRunResult:
     connection_status: str = ""
     warnings: List[str] = field(default_factory=list)
     memory: Dict[str, Any] = field(default_factory=dict)
+    workflow: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -37,6 +43,7 @@ class AgentRunResult:
             "connectionStatus": self.connection_status,
             "warnings": self.warnings,
             "memory": self.memory,
+            "workflow": self.workflow,
             "plan": self.plan.to_dict(),
             "execution": self.execution.to_dict(),
             "createdAt": datetime.now(timezone.utc).isoformat(),
@@ -65,16 +72,42 @@ class BrowserAgentRunner:
         self.allow_explicit_submit = allow_explicit_submit
 
     def run(self, url: str, task: str) -> AgentRunResult:
+        memory = AgentMemory(task=task)
         with PlaywrightBrowserRuntime(
             headless=self.headless,
             cdp_url=self.cdp_url,
             slow_mo=self.slow_mo,
             screenshot_dir=self.screenshot_dir,
             llm_config=self.llm_config,
-            memory=AgentMemory(task=task),
+            memory=memory,
         ) as runtime:
             observation = runtime.goto(url)
             plan, source, warnings = self._plan(task, observation)
+            controller = build_workflow_controller(task, observation, plan, f"python-{source}", runtime.memory)
+            if runtime.memory:
+                runtime.memory.remember_workflow(
+                    task_queue=[item.to_dict() for item in controller.task_queue],
+                    workers=[item.to_dict() for item in controller.worker_assignments],
+                    branches=[item.to_dict() for item in controller.parallel_branches],
+                )
+            workflow_trace = [self._workflow_trace_entry(controller, stage="controller_initialized")]
+            if is_parallel_workflow_task(task) and runtime.memory:
+                branch_results = self._run_parallel_branches(controller, runtime.memory)
+                for branch_result in branch_results:
+                    runtime.memory.merge_branch_result(branch_result.to_dict())
+                    workflow_trace.append(
+                        {
+                            "phase": "execute_browser_actions",
+                            "taskId": branch_result.branch_id,
+                            "workerId": branch_result.worker_id,
+                            "branchId": branch_result.branch_id,
+                            "assignedUrl": branch_result.target_url,
+                            "mergeEvent": True,
+                            "memoryDelta": {"candidatePool": len(runtime.memory.candidate_pool), "mergeLog": len(runtime.memory.merge_log)},
+                            "resultSummary": branch_result.summary,
+                            "status": branch_result.status,
+                        }
+                    )
             if runtime.connection_error:
                 warnings.append(f"CDP connection failed, fell back to temporary Chromium: {runtime.connection_error}")
             if self.max_steps > 0 and len(plan.actions) > self.max_steps:
@@ -85,6 +118,7 @@ class BrowserAgentRunner:
                     actions=plan.actions[: self.max_steps],
                 )
             execution, execution_warnings = self._execute_with_replanning(runtime, task, plan)
+            execution.trajectory = workflow_trace + execution.trajectory
             warnings.extend(execution_warnings)
             if self.linger_seconds > 0 and runtime.page:
                 runtime.page.wait_for_timeout(int(self.linger_seconds * 1000))
@@ -99,7 +133,90 @@ class BrowserAgentRunner:
                 connection_status="connected to Chrome CDP" if runtime.connected_over_cdp else "using temporary Chromium",
                 warnings=warnings,
                 memory=runtime.memory.to_dict() if runtime.memory else {},
+                workflow=controller.to_dict(),
             )
+
+    def _run_parallel_branches(self, controller: Any, memory: AgentMemory) -> List[BranchResult]:
+        branches = list(getattr(controller, "parallel_branches", []) or [])
+        if not branches:
+            return []
+        results: List[BranchResult] = []
+        max_workers = min(3, len(branches))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._execute_branch_worker, branch.worker_id, branch.task_id, branch.target_url, branch.title): branch
+                for branch in branches
+                if branch.target_url
+            }
+            for future in as_completed(futures):
+                branch = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = BranchResult(
+                        branch_id=branch.task_id,
+                        worker_id=branch.worker_id,
+                        status="error",
+                        target_url=branch.target_url,
+                        summary=f"{branch.title} 失败：{exc}",
+                        data={},
+                    )
+                results.append(result)
+        return results
+
+    def _execute_branch_worker(self, worker_id: str, branch_id: str, target_url: str, title: str) -> BranchResult:
+        try:
+            with urllib.request.urlopen(target_url, timeout=12) as response:
+                html = response.read().decode("utf-8", errors="replace")
+            observation = observe_html(html, target_url)
+            cards = [dict(card) for card in observation.cards[:8]]
+            summary_bits = []
+            if observation.title:
+                summary_bits.append(observation.title)
+            if observation.headings:
+                summary_bits.append(" / ".join(observation.headings[:3]))
+            text_lines = [line.strip() for line in re.split(r"[\n\r]+|(?<=[。！？])", observation.text) if len(line.strip()) >= 16]
+            if text_lines:
+                summary_bits.append(text_lines[0][:180])
+            return BranchResult(
+                branch_id=branch_id,
+                worker_id=worker_id,
+                status="done",
+                target_url=target_url,
+                summary=" | ".join(summary_bits)[:320] or title,
+                data={
+                    "cards": cards,
+                    "links": observation.links[:12],
+                    "headings": observation.headings[:8],
+                },
+            )
+        except urllib.error.URLError as exc:
+            return BranchResult(
+                branch_id=branch_id,
+                worker_id=worker_id,
+                status="degraded",
+                target_url=target_url,
+                summary=f"{title} 访问受限：{exc}",
+                data={},
+            )
+
+    def _workflow_trace_entry(self, controller: Any, stage: str) -> Dict[str, Any]:
+        active = getattr(controller, "active_task", None)
+        return {
+            "phase": getattr(controller, "current_phase", "plan_execution"),
+            "taskId": getattr(active, "task_id", "") if active else "",
+            "workerId": "",
+            "branchId": "",
+            "assignedUrl": "",
+            "memoryDelta": {},
+            "mergeEvent": False,
+            "queueState": {
+                "activeWorkers": len([item for item in getattr(controller, "worker_assignments", []) if getattr(item, "status", "") in {"pending", "active", "running"}]),
+                "taskQueue": [item.to_dict() for item in getattr(controller, "task_queue", [])],
+            },
+            "stage": stage,
+            "reasoning": getattr(controller, "phase_reasoning", ""),
+        }
 
     def _plan(self, task: str, observation: Observation) -> tuple[Plan, str, List[str]]:
         warnings: List[str] = []

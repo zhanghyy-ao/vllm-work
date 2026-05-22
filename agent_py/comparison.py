@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from .llm_planner import LLMConfig, _post_json
+from .llm_planner import LLMConfig, request_text_completion
 from .memory import AgentMemory
 from .schema import Observation
 
@@ -22,6 +22,62 @@ def generate_comparison(
     if llm_result:
         return llm_result
     return _compare_with_rules(command, observation, candidates, memory)
+
+
+def recommend_from_observation(
+    command: str,
+    observation: Observation,
+    memory: Optional[AgentMemory] = None,
+    llm_config: Optional[LLMConfig] = None,
+    require_llm: bool = True,
+) -> Dict[str, Any]:
+    candidates = build_candidate_set(observation, memory)
+    if len(candidates) < 2:
+        return {
+            "ok": False,
+            "error": "candidate_insufficient",
+            "message": "候选数量不足，无法生成可靠推荐。",
+            "candidateCount": len(candidates),
+            "candidates": candidates,
+        }
+    llm_result: Dict[str, Any] = {}
+    llm_error = ""
+    if llm_config and llm_config.enabled:
+        try:
+            llm_result = _recommend_with_llm_json(command, observation, candidates, memory, llm_config)
+        except Exception as exc:
+            llm_error = str(exc)
+    if require_llm and not llm_result:
+        return {
+            "ok": False,
+            "error": "llm_required_failed",
+            "message": llm_error or "LLM 未返回可解析推荐结果。",
+            "candidateCount": len(candidates),
+            "candidates": candidates,
+        }
+    if not llm_result:
+        text_result = _compare_with_rules(command, observation, candidates, memory)
+        winner = candidates[0]["title"] if candidates else ""
+        return {
+            "ok": True,
+            "source": "rule",
+            "comparisonTable": _simple_comparison_table(candidates),
+            "topPick": winner,
+            "why": text_result,
+            "evidence": [str(item.get("href") or item.get("source_url") or "") for item in candidates[:6] if str(item.get("href") or item.get("source_url") or "")],
+            "confidence": 0.58,
+            "candidateCount": len(candidates),
+        }
+    return {
+        "ok": True,
+        "source": "python-llm",
+        "comparisonTable": llm_result.get("comparisonTable", []),
+        "topPick": str(llm_result.get("topPick") or ""),
+        "why": str(llm_result.get("why") or ""),
+        "evidence": [str(item) for item in llm_result.get("evidence", []) if str(item).strip()],
+        "confidence": float(llm_result.get("confidence", 0.0) or 0.0),
+        "candidateCount": len(candidates),
+    }
 
 
 def build_candidate_set(observation: Observation, memory: Optional[AgentMemory] = None) -> List[Dict[str, Any]]:
@@ -148,14 +204,70 @@ def _compare_with_llm(
         ],
     }
     try:
-        data = _post_json(f"{llm_config.api_base.rstrip('/')}/chat/completions", payload, llm_config)
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        content = request_text_completion(payload["messages"], llm_config, temperature=0.1)
         parsed = _parse_compare_json(content)
         if not parsed:
             return ""
         return _render_llm_result(parsed, observation, memory)
     except Exception:
         return ""
+
+
+def _recommend_with_llm_json(
+    command: str,
+    observation: Observation,
+    candidates: List[Dict[str, Any]],
+    memory: Optional[AgentMemory],
+    llm_config: LLMConfig,
+) -> Dict[str, Any]:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是商品比较助手。只输出 JSON。格式："
+                '{"comparisonTable":[{"title":str,"price":str,"sound":str,"performance":str,"comfort":str,"battery":str,"score":number,"reason":str,"url":str}],"topPick":str,"why":str,"evidence":[str],"confidence":number}。'
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "task": command,
+                    "page": {"url": observation.url, "title": observation.title},
+                    "memory": memory.to_dict() if memory else {},
+                    "candidates": candidates[:10],
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    content = request_text_completion(messages, llm_config, temperature=0.2)
+    parsed = _parse_compare_json(content)
+    if not parsed:
+        raise ValueError("LLM recommendation JSON parse failed")
+    table = parsed.get("comparisonTable")
+    if not isinstance(table, list):
+        raise ValueError("LLM recommendation missing comparisonTable")
+    return parsed
+
+
+def _simple_comparison_table(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    table: List[Dict[str, Any]] = []
+    for item in candidates[:6]:
+        table.append(
+            {
+                "title": str(item.get("title") or ""),
+                "price": str(item.get("price_text") or ""),
+                "sound": "",
+                "performance": "",
+                "comfort": "",
+                "battery": "",
+                "score": round(float(item.get("score", 0.0) or 0.0), 2),
+                "reason": str(item.get("feature_summary") or ""),
+                "url": str(item.get("href") or item.get("source_url") or ""),
+            }
+        )
+    return table
 
 
 def _parse_compare_json(content: str) -> Dict[str, Any]:

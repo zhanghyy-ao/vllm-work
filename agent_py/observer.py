@@ -71,16 +71,57 @@ def _selector_for(node: Node) -> str:
     node_id = node.attr("id")
     if node_id:
         return f'#{_css_escape(node_id)}'
+    return _selector_path(node)
+
+
+def _selector_path(node: Node) -> str:
+    parts: List[str] = []
+    current: Optional[Node] = node
+    depth = 0
+    while current and current.tag != "document" and depth < 6:
+        parts.append(_selector_step(current))
+        if current.attr("id"):
+            break
+        current = current.parent
+        depth += 1
+    return " > ".join(reversed(parts)) if parts else node.tag
+
+
+def _selector_step(node: Node) -> str:
+    node_id = node.attr("id")
+    if node_id:
+        return f'#{_css_escape(node_id)}'
+    attrs: List[str] = []
     name = node.attr("name")
     if name:
-        return f'{node.tag}[name="{_css_escape(name)}"]'
+        attrs.append(f'[name="{_css_escape(name)}"]')
+    input_type = node.attr("type")
+    if input_type and node.tag == "input":
+        attrs.append(f'[type="{_css_escape(input_type)}"]')
     aria = node.attr("aria-label")
-    if aria:
-        return f'{node.tag}[aria-label="{_css_escape(aria)}"]'
+    if aria and len(aria) <= 80:
+        attrs.append(f'[aria-label="{_css_escape(aria)}"]')
     href = node.attr("href")
-    if href:
-        return f'{node.tag}[href="{_css_escape(href)}"]'
-    return node.tag
+    if href and len(href) <= 160:
+        attrs.append(f'[href="{_css_escape(href)}"]')
+    base = f"{node.tag}{''.join(attrs)}"
+    nth = _nth_of_type(node)
+    if nth > 1 or (not attrs and node.parent):
+        return f"{base}:nth-of-type({nth})"
+    return base
+
+
+def _nth_of_type(node: Node) -> int:
+    if not node.parent:
+        return 1
+    count = 0
+    for sibling in node.parent.children:
+        if sibling.tag != node.tag:
+            continue
+        count += 1
+        if sibling is node:
+            return count
+    return 1
 
 
 def _ancestor_attr(node: Node, tag: str, attr: str) -> str:

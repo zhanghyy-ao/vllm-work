@@ -453,10 +453,9 @@ def _score_element(element: Element, keywords: list[str]) -> int:
             continue
         if key in haystack:
             score += 10
-        else:
-            fuzzy = sum(1 for char in key if char in haystack)
-            if fuzzy >= min(2, len(key)):
-                score += fuzzy
+        token_hits = [token for token in re.split(r"[\s/_-]+", key) if len(token) >= 2]
+        if token_hits and all(token in haystack for token in token_hits):
+            score += 6
     return score
 
 

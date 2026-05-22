@@ -212,15 +212,18 @@ class PlaywrightBrowserRuntime:
         if not target_id or not target_id.startswith("e"):
             raise ValueError(f"Invalid target id: {target_id}")
         element = self._element_for(target_id)
-        if element:
-            locator = self._locator_from_element(element)
+        if not element:
+            raise ValueError(f"Target not found in latest observation: {target_id}")
+        locator = self._locator_from_element(element)
+        if locator:
+            return locator
+        refreshed = self.observe()
+        rematched = self._best_live_match(element, refreshed.elements)
+        if rematched:
+            locator = self._locator_from_element(rematched)
             if locator:
                 return locator
-        index = int(target_id[1:]) - 1
-        all_targets = self.page.locator(INTERACTIVE_SELECTOR)
-        if index < 0 or all_targets.count() <= index:
-            raise ValueError(f"Target not found: {target_id}")
-        return all_targets.nth(index)
+        raise ValueError(f"Could not relocate target reliably: {target_id} ({element.label or element.text or element.selector})")
 
     def _element_for(self, target_id: str) -> Optional[Element]:
         if not self.last_observation:
@@ -243,12 +246,167 @@ class PlaywrightBrowserRuntime:
             candidates.append(self.page.get_by_role(element.role, name=element.text))
         for locator in candidates:
             try:
-                count = locator.count()
-                if count == 1:
-                    return locator
+                resolved = self._best_locator_candidate(locator, element)
+                if resolved:
+                    return resolved
             except Exception:
                 continue
         return None
+
+    def _best_locator_candidate(self, locator: Any, element: Element):
+        count = locator.count()
+        if count <= 0:
+            return None
+        if count == 1:
+            only = locator.first
+            if self._locator_signature_score(only, element) >= 16:
+                return only
+            return None
+        best_index = -1
+        best_score = -1
+        limit = min(count, 8)
+        for index in range(limit):
+            candidate = locator.nth(index)
+            score = self._locator_signature_score(candidate, element)
+            if score > best_score:
+                best_score = score
+                best_index = index
+        if best_index >= 0 and best_score >= 20:
+            return locator.nth(best_index)
+        return None
+
+    def _locator_signature_score(self, locator: Any, element: Element) -> int:
+        try:
+            info = locator.evaluate(
+                """node => {
+                    const textOf = value => String(value || '').replace(/\\s+/g, ' ').trim();
+                    const labelFor = new Map(Array.from(document.querySelectorAll('label[for]')).map(label => [label.getAttribute('for'), textOf(label.innerText || label.textContent)]));
+                    const nearestLabel = target => {
+                        const aria = target.getAttribute('aria-label');
+                        if (aria) return textOf(aria);
+                        if (target.id && labelFor.has(target.id)) return labelFor.get(target.id);
+                        const wrapping = target.closest('label');
+                        return wrapping ? textOf(wrapping.innerText || wrapping.textContent) : '';
+                    };
+                    const sectionLabel = target => {
+                        const parent = target.closest('section, article, form, main');
+                        if (!parent) return '';
+                        const aria = parent.getAttribute('aria-label');
+                        if (aria) return textOf(aria);
+                        const heading = parent.querySelector('h1,h2,h3');
+                        return heading ? textOf(heading.innerText || heading.textContent) : '';
+                    };
+                    const rect = target.getBoundingClientRect();
+                    return {
+                        tag: (node.tagName || '').toLowerCase(),
+                        role: node.getAttribute('role') || '',
+                        type: node.getAttribute('type') || '',
+                        name: node.getAttribute('name') || '',
+                        label: nearestLabel(node),
+                        text: textOf(node.innerText || node.textContent).slice(0, 160),
+                        placeholder: node.getAttribute('placeholder') || '',
+                        href: node.href || node.getAttribute('href') || '',
+                        formId: (node.closest('form') && (node.closest('form').id || node.closest('form').getAttribute('aria-label'))) || '',
+                        sectionLabel: sectionLabel(node),
+                        visible: !!(rect.width || rect.height),
+                        enabled: !node.disabled && node.getAttribute('aria-disabled') !== 'true'
+                    };
+                }""",
+                timeout=2500,
+            )
+        except Exception:
+            return -1
+        haystack = " ".join(
+            str(info.get(key) or "")
+            for key in ["tag", "role", "type", "name", "label", "text", "placeholder", "href", "formId", "sectionLabel"]
+        ).lower()
+        score = 0
+        if info.get("tag") == element.tag:
+            score += 4
+        if info.get("role") == element.role and element.role:
+            score += 5
+        if info.get("type") == element.type and element.type:
+            score += 4
+        for field, weight in [("name", 6), ("label", 10), ("text", 10), ("placeholder", 8), ("href", 12), ("formId", 8), ("sectionLabel", 6)]:
+            expected = str(getattr(element, self._element_attr_name(field)) or "").strip().lower()
+            actual = str(info.get(field) or "").strip().lower()
+            if not expected or not actual:
+                continue
+            if expected == actual:
+                score += weight
+            elif expected in actual or actual in expected:
+                score += max(3, weight // 2)
+        if info.get("visible") == element.visible:
+            score += 2
+        if info.get("enabled") == element.enabled:
+            score += 2
+        token_hits = [token for token in self._signature_tokens(element) if token in haystack]
+        score += min(len(token_hits), 6)
+        return score
+
+    def _element_attr_name(self, field: str) -> str:
+        return {
+            "formId": "form_id",
+            "sectionLabel": "section_label",
+        }.get(field, field)
+
+    def _signature_tokens(self, element: Element) -> list[str]:
+        values = [
+            element.label,
+            element.text,
+            element.placeholder,
+            element.name,
+            element.href,
+            element.form_id,
+            element.section_label,
+        ]
+        tokens = []
+        for value in values:
+            for token in str(value or "").lower().replace("/", " ").replace("-", " ").split():
+                if len(token) >= 2:
+                    tokens.append(token)
+        return tokens
+
+    def _best_live_match(self, element: Element, candidates: list[Element]) -> Optional[Element]:
+        best: Optional[Element] = None
+        best_score = -1
+        for candidate in candidates:
+            score = self._element_similarity_score(element, candidate)
+            if score > best_score:
+                best_score = score
+                best = candidate
+        return best if best and best_score >= 18 else None
+
+    def _element_similarity_score(self, left: Element, right: Element) -> int:
+        score = 0
+        if left.tag == right.tag:
+            score += 4
+        if left.role and left.role == right.role:
+            score += 4
+        if left.type and left.type == right.type:
+            score += 3
+        for attr, weight in [
+            ("name", 5),
+            ("label", 8),
+            ("text", 8),
+            ("placeholder", 6),
+            ("href", 10),
+            ("form_id", 6),
+            ("section_label", 5),
+        ]:
+            a = str(getattr(left, attr) or "").strip().lower()
+            b = str(getattr(right, attr) or "").strip().lower()
+            if not a or not b:
+                continue
+            if a == b:
+                score += weight
+            elif a in b or b in a:
+                score += max(2, weight // 2)
+        if left.visible == right.visible:
+            score += 1
+        if left.enabled == right.enabled:
+            score += 1
+        return score
 
     def _highlight_locator(self, locator: Any) -> None:
         try:
@@ -398,13 +556,38 @@ class PlaywrightBrowserRuntime:
                     return heading ? textOf(heading) : '';
                 };
                 const selectorFor = node => {
-                    if (node.id) return `#${cssEscape(node.id)}`;
-                    if (node.name) return `${node.tagName.toLowerCase()}[name="${String(node.name).replace(/"/g, '\\\\"')}"]`;
-                    const aria = node.getAttribute('aria-label');
-                    if (aria) return `${node.tagName.toLowerCase()}[aria-label="${String(aria).replace(/"/g, '\\\\"')}"]`;
-                    const href = node.getAttribute('href');
-                    if (href) return `${node.tagName.toLowerCase()}[href="${String(href).replace(/"/g, '\\\\"')}"]`;
-                    return node.tagName.toLowerCase();
+                    const nthOfType = target => {
+                        let count = 0;
+                        let sibling = target;
+                        while (sibling) {
+                            if (sibling.tagName === target.tagName) count += 1;
+                            sibling = sibling.previousElementSibling;
+                        }
+                        return count || 1;
+                    };
+                    const step = target => {
+                        if (target.id) return `#${cssEscape(target.id)}`;
+                        const tag = target.tagName.toLowerCase();
+                        const attrs = [];
+                        if (target.getAttribute('name')) attrs.push(`[name="${String(target.getAttribute('name')).replace(/"/g, '\\\\"')}"]`);
+                        if (tag === 'input' && target.getAttribute('type')) attrs.push(`[type="${String(target.getAttribute('type')).replace(/"/g, '\\\\"')}"]`);
+                        if (target.getAttribute('aria-label')) attrs.push(`[aria-label="${String(target.getAttribute('aria-label')).replace(/"/g, '\\\\"')}"]`);
+                        if (target.getAttribute('href')) attrs.push(`[href="${String(target.getAttribute('href')).replace(/"/g, '\\\\"')}"]`);
+                        const base = `${tag}${attrs.join('')}`;
+                        const nth = nthOfType(target);
+                        if (nth > 1 || attrs.length === 0) return `${base}:nth-of-type(${nth})`;
+                        return base;
+                    };
+                    const parts = [];
+                    let current = node;
+                    let depth = 0;
+                    while (current && current.nodeType === Node.ELEMENT_NODE && depth < 6) {
+                        parts.push(step(current));
+                        if (current.id) break;
+                        current = current.parentElement;
+                        depth += 1;
+                    }
+                    return parts.reverse().join(' > ');
                 };
                 return nodes.map((node, index) => {
                     const rect = node.getBoundingClientRect();

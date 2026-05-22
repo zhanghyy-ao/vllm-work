@@ -34,6 +34,7 @@ class PythonBrowserAgentTest(unittest.TestCase):
         self.assertGreaterEqual(len(self.observation.tables), 1)
         self.assertIn("agent-demo@sysu.example", self.observation.emails)
         self.assertTrue(any(link["text"] == "WebVoyager" for link in self.observation.links))
+        self.assertTrue(any(element.selector.startswith("#") or " > " in element.selector for element in self.observation.elements))
 
     def test_search_skill(self) -> None:
         harness = self.run_task("搜索 多模态大模型")
@@ -205,6 +206,13 @@ class PythonBrowserAgentTest(unittest.TestCase):
         target = next(element for element in self.observation.elements if element.id == target_id)
         self.assertEqual(target.text, "Browser Harness")
         self.assertIn("browser-harness", target.href)
+
+    def test_search_targeting_does_not_match_by_character_overlap_only(self) -> None:
+        plan = plan_task("搜索 Browser Harness", self.observation)
+        click_actions = [action for action in plan.actions if action.type == "click"]
+        self.assertTrue(click_actions)
+        target = next(element for element in self.observation.elements if element.id == click_actions[0].target_id)
+        self.assertIn("搜索", target.haystack())
 
 
 if __name__ == "__main__":

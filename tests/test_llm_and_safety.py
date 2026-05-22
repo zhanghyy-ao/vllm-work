@@ -76,19 +76,23 @@ class LLMAndSafetyTest(unittest.TestCase):
         clean = sanitize_plan(plan, self.observation, allow_explicit_submit=True)
         self.assertEqual(clean.actions[0].type, "highlight")
 
-    def test_gemini_model_can_use_openai_compatible_base(self) -> None:
+    def test_gemini_model_on_synai_uses_native_endpoint(self) -> None:
         config = LLMConfig(
             api_base="https://synai996.space/v1",
             api_key="test-key",
-            model="gemini-3.1-pro-low",
+            model="gemini-3-flash",
         )
 
         with patch("agent_py.llm_planner._post_json") as post_json:
             post_json.return_value = {
-                "choices": [
+                "candidates": [
                     {
-                        "message": {
-                            "content": '{"summary":"ok","confidence":0.8,"warnings":[],"actions":[{"type":"summarize","reason":"test"}]}'
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": '{"summary":"ok","confidence":0.8,"warnings":[],"actions":[{"type":"summarize","reason":"test"}]}'
+                                }
+                            ]
                         }
                     }
                 ]
@@ -97,8 +101,7 @@ class LLMAndSafetyTest(unittest.TestCase):
             plan = plan_with_llm("总结当前页面", self.observation, config)
 
         args, _kwargs = post_json.call_args
-        self.assertEqual(args[0], "https://synai996.space/v1/chat/completions")
-        self.assertEqual(args[1]["model"], "gemini-3.1-pro-low")
+        self.assertIn("/v1beta/models/gemini-3-flash:generateContent", args[0])
         self.assertEqual(plan.actions[0].type, "summarize")
 
     def test_explicit_gemini_base_uses_native_endpoint(self) -> None:
@@ -136,19 +139,11 @@ class LLMAndSafetyTest(unittest.TestCase):
             api_key="test-key",
             model="vllm-compare",
         )
-        with patch("agent_py.comparison._post_json") as post_json:
-            post_json.return_value = {
-                "choices": [
-                    {
-                        "message": {
-                            "content": (
-                                '{"focus":"浏览器智能体","winner":"Browser Harness","summary":"更适合工程化。",'
-                                '"ranking":[{"title":"Browser Harness","reason":"CDP 与 skills 更完整","score":9.4,"price":"¥0","rating":"4.7","date":"","features":["CDP","skills"]}]}'
-                            )
-                        }
-                    }
-                ]
-            }
+        with patch("agent_py.comparison.request_text_completion") as request_text_completion:
+            request_text_completion.return_value = (
+                '{"focus":"浏览器智能体","winner":"Browser Harness","summary":"更适合工程化。",'
+                '"ranking":[{"title":"Browser Harness","reason":"CDP 与 skills 更完整","score":9.4,"price":"¥0","rating":"4.7","date":"","features":["CDP","skills"]}]}'
+            )
             artifact = generate_comparison("比较这些浏览器智能体方案", self.observation, llm_config=config)
         self.assertIn("LLM 总结", artifact)
         self.assertIn("Browser Harness", artifact)

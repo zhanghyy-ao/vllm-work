@@ -15,6 +15,14 @@ class AgentMemory:
     notes: List[str] = field(default_factory=list)
     candidate_snapshots: List[Dict[str, Any]] = field(default_factory=list)
     detail_pages: List[Dict[str, Any]] = field(default_factory=list)
+    task_queue: List[Dict[str, Any]] = field(default_factory=list)
+    workers: List[Dict[str, Any]] = field(default_factory=list)
+    candidate_pool: List[Dict[str, Any]] = field(default_factory=list)
+    evidence_by_candidate: Dict[str, List[str]] = field(default_factory=dict)
+    source_graph: List[Dict[str, Any]] = field(default_factory=list)
+    merge_log: List[Dict[str, Any]] = field(default_factory=list)
+    open_branches: List[Dict[str, Any]] = field(default_factory=list)
+    closed_branches: List[Dict[str, Any]] = field(default_factory=list)
 
     def remember(self, action: Action, observation: Observation, output: Any = None, artifact: str = "") -> None:
         if observation.url and observation.url not in self.visited_urls:
@@ -55,6 +63,14 @@ class AgentMemory:
             "notes": self.notes,
             "candidateSnapshots": self.candidate_snapshots,
             "detailPages": self.detail_pages,
+            "taskQueue": self.task_queue,
+            "workers": self.workers,
+            "candidatePool": self.candidate_pool,
+            "evidenceByCandidate": self.evidence_by_candidate,
+            "sourceGraph": self.source_graph,
+            "mergeLog": self.merge_log,
+            "openBranches": self.open_branches,
+            "closedBranches": self.closed_branches,
         }
 
     def summary(self) -> str:
@@ -68,7 +84,68 @@ class AgentMemory:
             parts.append(f"累计候选：{count}")
         if self.detail_pages:
             parts.append(f"详情页采样：{len(self.detail_pages)}")
+        if self.workers:
+            active = sum(1 for worker in self.workers if str(worker.get("status") or "") in {"pending", "active", "running"})
+            parts.append(f"并行 worker：{active}/{len(self.workers)}")
         return "；".join(parts)
+
+    def remember_workflow(self, task_queue: List[Dict[str, Any]], workers: List[Dict[str, Any]], branches: List[Dict[str, Any]]) -> None:
+        self.task_queue = [dict(item) for item in task_queue]
+        self.workers = [dict(item) for item in workers]
+        self.open_branches = [dict(item) for item in branches]
+        note = f"更新阶段队列：{len(task_queue)} 个任务，{len(branches)} 个并行分支"
+        if note not in self.notes:
+            self.notes.append(note)
+            self.notes = self.notes[-20:]
+
+    def merge_branch_result(self, branch_result: Dict[str, Any]) -> None:
+        branch_id = str(branch_result.get("branchId") or branch_result.get("branch_id") or "")
+        worker_id = str(branch_result.get("workerId") or branch_result.get("worker_id") or "")
+        data = branch_result.get("data") if isinstance(branch_result.get("data"), dict) else {}
+        summary = str(branch_result.get("summary") or "").strip()
+        target_url = str(branch_result.get("targetUrl") or branch_result.get("target_url") or "")
+
+        cards = data.get("cards") if isinstance(data.get("cards"), list) else []
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            title = str(card.get("title") or "").strip()
+            if not title:
+                continue
+            existing = next((item for item in self.candidate_pool if item.get("title") == title), None)
+            merged = {
+                "title": title,
+                "summary": str(card.get("summary") or "")[:240],
+                "href": str(card.get("href") or target_url),
+                "workerId": worker_id,
+                "branchId": branch_id,
+            }
+            if existing:
+                for key, value in merged.items():
+                    if value and not existing.get(key):
+                        existing[key] = value
+            else:
+                self.candidate_pool.append(merged)
+        if summary:
+            key = branch_id or target_url or worker_id or f"branch-{len(self.merge_log) + 1}"
+            self.source_graph.append({"branchId": branch_id, "workerId": worker_id, "targetUrl": target_url, "summary": summary})
+            self.evidence_by_candidate.setdefault(key, [])
+            if summary not in self.evidence_by_candidate[key]:
+                self.evidence_by_candidate[key].append(summary)
+        self.merge_log.append(
+            {
+                "branchId": branch_id,
+                "workerId": worker_id,
+                "targetUrl": target_url,
+                "mergedKeys": sorted(list(data.keys())),
+                "summary": summary[:160],
+            }
+        )
+        self.merge_log = self.merge_log[-20:]
+        if branch_id:
+            self.closed_branches.append({"branchId": branch_id, "workerId": worker_id, "targetUrl": target_url, "summary": summary[:120]})
+            self.closed_branches = self.closed_branches[-12:]
+            self.open_branches = [item for item in self.open_branches if str(item.get("taskId") or item.get("task_id") or "") != branch_id]
 
     def remember_detail_page(
         self,

@@ -30,18 +30,20 @@
       </section>
 
       <details class="settings">
-        <summary>LLM Planner 设置（可选）</summary>
+        <summary>后端设置（默认使用后端 .env）</summary>
+        <label class="input-label" for="backendUrl">Python Backend URL</label>
+        <input id="backendUrl" placeholder="http://127.0.0.1:8787" />
+        <p class="hint">推荐先启动本地 Python 服务：<code>python3 scripts/serve_agent_ui.py</code></p>
         <label class="check-row">
           <input id="useLlm" type="checkbox" />
-          使用 OpenAI-compatible LLM 生成计划
+          使用 Python 后端中的 LLM 生成计划
         </label>
-        <label class="input-label" for="apiBase">API Base</label>
-        <input id="apiBase" placeholder="https://api.openai.com/v1" />
-        <label class="input-label" for="apiKey">API Key</label>
-        <input id="apiKey" type="password" placeholder="sk-..." />
-        <label class="input-label" for="modelName">Model</label>
-        <input id="modelName" placeholder="gpt-4o-mini / qwen-vl-plus / ..." />
-        <button id="saveSettings" type="button">保存设置</button>
+        <p class="hint">插件不会覆盖后端模型配置。模型、API Base 和 API Key 全部以 Python 后端 <code>.env</code> 为准。</p>
+        <div class="actions">
+          <button id="checkBackendBtn" type="button">检测后端</button>
+          <button id="saveSettings" type="button">保存设置</button>
+        </div>
+        <pre id="backendStatus">尚未检测后端。</pre>
       </details>
 
       <label class="input-label" for="task">任务指令</label>
@@ -58,13 +60,18 @@
       </section>
 
       <section class="status">
+        <h2>工作流</h2>
+        <div id="workflowMeta" class="workflow-meta">尚未生成工作流。</div>
+        <div id="queueTree" class="queue-tree"></div>
+      </section>
+
+      <section class="status">
         <h2>执行日志</h2>
         <pre id="logOutput">等待执行。</pre>
       </section>
     </main>
 
     <script src="planner.js"></script>
-    <script src="model_planner.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

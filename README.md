@@ -121,6 +121,38 @@ http://127.0.0.1:8787
 - `项目分析`：适用于项目页、产品页、论文项目主页，输出可复用模块、关键资源和下一步建议。
 - `页面查找`：适用于长文档或复杂页面，定位关键词相关片段和可操作元素。
 
+## Chrome 插件模式
+
+当前仓库已经支持 `extension/` 作为浏览器前端、`agent_py/web_app.py` 作为本地 Python 后端。
+
+启动后端：
+
+```bash
+python3 scripts/serve_agent_ui.py
+```
+
+加载插件：
+
+1. 打开 Chrome 的扩展管理页：`chrome://extensions`
+2. 打开“开发者模式”
+3. 选择“加载已解压的扩展程序”
+4. 选择目录：`/Users/zhanghyy-ao/Desktop/课程材料/多模态/vllm-work/extension`
+
+插件使用：
+
+- 在任意网页打开插件 popup
+- 在“后端与 LLM 设置”中确认 `Python Backend URL` 为 `http://127.0.0.1:8787`
+- 点击“检测后端”
+- 输入任务后点击“生成计划”
+- 确认计划后点击“执行计划”
+
+当前插件模式采用：
+
+- Chrome 插件：采集当前页 observation、展示任务输入、执行 click/type/highlight
+- Python 后端：规则 Planner / LLM Planner / 安全过滤 / 计划补全
+
+如果后端不可用，插件会自动回退到本地 JS 规划器，保证基础 Demo 可继续运行。
+
 ## LLM Planner（可选）
 
 默认使用本地规则 Planner，不需要 API Key。若希望让 LLM 根据页面状态生成更灵活的动作计划：
@@ -185,6 +217,7 @@ python3 scripts/run_real_browser_checks.py
 - `docs/04-evaluation.md`：评测方案。
 - `docs/07-product-requirements-document.md`：完整 PRD。
 - `docs/08-version-roadmap.md`：版本迭代规划。
+- `docs/09-detailed-feature-report.md`：详细功能报告，补充每个功能的目标、流程、异常处理和验收指标。
 
 ## 后续路线
 

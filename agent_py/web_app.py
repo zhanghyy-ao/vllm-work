@@ -4,11 +4,19 @@ import html
 import json
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
+from .comparison import recommend_from_observation
 from .llm_planner import LLMConfig
+from .llm_planner import try_plan_with_llm
+from .memory import AgentMemory
+from .planner import plan_task
 from .runner import BrowserAgentRunner, save_trajectory
+from .safety import sanitize_plan
+from .schema import Element, Observation
+from .workflow import build_workflow_controller
 
 
 LAST_RESULT: Dict[str, Any] = {}
@@ -16,11 +24,180 @@ LAST_RESULT: Dict[str, Any] = {}
 
 def create_app():
     try:
-        from flask import Flask, Response, abort, redirect, render_template_string, request, send_file, url_for
+        from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, send_file, url_for
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("Flask is not installed. Run: python3 -m pip install -r requirements.txt") from exc
 
     app = Flask(__name__)
+
+    @app.after_request
+    def add_cors_headers(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        return response
+
+    @app.route("/api/extension/health", methods=["GET", "OPTIONS"])
+    def extension_health():
+        if request.method == "OPTIONS":
+            return Response(status=204)
+        env_config = LLMConfig.from_env()
+        return jsonify(
+            {
+                "ok": True,
+                "service": "python-browser-agent",
+                "version": "0.1.0",
+                "llmEnvConfigured": env_config.enabled,
+                "llmDefaultSource": "python-llm" if env_config.enabled else "python-rule",
+                "llmModel": env_config.model if env_config.enabled else "",
+                "llmTransport": env_config.transport if env_config.enabled else "",
+            }
+        )
+
+    @app.route("/api/extension/plan", methods=["POST", "OPTIONS"])
+    def extension_plan():
+        if request.method == "OPTIONS":
+            return Response(status=204)
+        payload = request.get_json(silent=True) or {}
+        task = str(payload.get("task") or "").strip()
+        observation_data = payload.get("observation") if isinstance(payload.get("observation"), dict) else {}
+        settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
+        if not task:
+            return jsonify({"ok": False, "error": "task is required"}), 400
+        observation = _observation_from_extension(observation_data)
+        task_mode = _task_mode(task)
+        llm_required = task_mode == "recommendation"
+        env_config = LLMConfig.from_env()
+        # Extension defaults to backend-managed LLM config from .env.
+        # We only honor override fields if explicitly enabled for debugging.
+        allow_override = bool(settings.get("allowLlmOverride"))
+        llm_config = LLMConfig(
+            api_base=str(settings.get("apiBase") or env_config.api_base) if allow_override else env_config.api_base,
+            api_key=str(settings.get("apiKey") or env_config.api_key) if allow_override else env_config.api_key,
+            model=str(settings.get("model") or env_config.model) if allow_override else env_config.model,
+        )
+        allow_explicit_submit = bool(settings.get("allowExplicitSubmit"))
+        source = "rule"
+        warnings = []
+        llm_status = "not_requested"
+        failure_code = ""
+        explicit_use_llm = settings.get("useLlm")
+        llm_requested = bool(explicit_use_llm) if explicit_use_llm is not None else llm_config.enabled
+        if llm_required:
+            llm_requested = True
+        llm_plan = None
+        if llm_requested:
+            try:
+                llm_plan = try_plan_with_llm(task, observation, llm_config, allow_explicit_submit=allow_explicit_submit)
+                llm_status = "success" if llm_plan else "empty"
+            except Exception as exc:
+                warnings.append(f"vLLM 规划失败，已回退规则 planner：{exc}")
+                llm_status = "failed"
+                failure_code = _llm_failure_code(str(exc))
+        if llm_required and (not llm_requested or not llm_plan):
+            if llm_status == "not_requested":
+                llm_status = "failed"
+                failure_code = "task_failed_llm_required"
+            elif not failure_code:
+                failure_code = "task_failed_llm_required"
+            return jsonify(
+                {
+                    "ok": False,
+                    "source": "none",
+                    "taskMode": task_mode,
+                    "llmRequired": True,
+                    "llmRequested": llm_requested,
+                    "llmEnabled": llm_config.enabled,
+                    "llmModel": llm_config.model if llm_config.enabled else "",
+                    "llmTransport": llm_config.transport if llm_config.enabled else "",
+                    "llmStatus": llm_status,
+                    "failureCode": failure_code,
+                    "warnings": warnings or ["推荐任务要求 LLM 参与，当前规划已中断。"],
+                    "error": "LLM required for recommendation task.",
+                }
+            ), 409
+        if llm_plan:
+            plan = llm_plan
+            source = "python-llm"
+        else:
+            plan = sanitize_plan(plan_task(task, observation), observation, allow_explicit_submit=allow_explicit_submit)
+            plan = BrowserAgentRunner()._complete_plan(task, plan)
+            source = "python-rule"
+        controller = build_workflow_controller(task, observation, plan, source)
+        return jsonify(
+            {
+                "ok": True,
+                "source": source,
+                "taskMode": task_mode,
+                "llmRequired": llm_required,
+                "llmRequested": llm_requested,
+                "llmEnabled": llm_config.enabled,
+                "llmModel": llm_config.model if llm_config.enabled else "",
+                "llmTransport": llm_config.transport if llm_config.enabled else "",
+                "llmStatus": llm_status,
+                "failureCode": failure_code,
+                "warnings": warnings + list(plan.warnings),
+                "plan": plan.to_dict(),
+                "controller": controller.to_dict(),
+            }
+        )
+
+    @app.route("/api/extension/recommend", methods=["POST", "OPTIONS"])
+    def extension_recommend():
+        if request.method == "OPTIONS":
+            return Response(status=204)
+        payload = request.get_json(silent=True) or {}
+        task = str(payload.get("task") or "").strip()
+        observation_data = payload.get("observation") if isinstance(payload.get("observation"), dict) else {}
+        execution_data = payload.get("execution") if isinstance(payload.get("execution"), dict) else {}
+        settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
+        if not task:
+            return jsonify({"ok": False, "error": "task is required"}), 400
+
+        observation = _observation_from_extension(observation_data)
+        env_config = LLMConfig.from_env()
+        allow_override = bool(settings.get("allowLlmOverride"))
+        llm_config = LLMConfig(
+            api_base=str(settings.get("apiBase") or env_config.api_base) if allow_override else env_config.api_base,
+            api_key=str(settings.get("apiKey") or env_config.api_key) if allow_override else env_config.api_key,
+            model=str(settings.get("model") or env_config.model) if allow_override else env_config.model,
+        )
+
+        memory = AgentMemory(task=task)
+        raw_memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+        memory.search_queries = [str(item) for item in raw_memory.get("searchQueries", [])] if isinstance(raw_memory.get("searchQueries"), list) else []
+        memory.visited_urls = [str(item) for item in raw_memory.get("visitedUrls", [])] if isinstance(raw_memory.get("visitedUrls"), list) else []
+        memory.notes = [str(item) for item in raw_memory.get("notes", [])] if isinstance(raw_memory.get("notes"), list) else []
+        memory.candidate_snapshots = [item for item in raw_memory.get("candidateSnapshots", []) if isinstance(item, dict)] if isinstance(raw_memory.get("candidateSnapshots"), list) else []
+        memory.detail_pages = [item for item in raw_memory.get("detailPages", []) if isinstance(item, dict)] if isinstance(raw_memory.get("detailPages"), list) else []
+
+        artifact_path = _persist_recommendation_payload(task, observation_data, execution_data, raw_memory)
+        result = recommend_from_observation(task, observation, memory=memory, llm_config=llm_config, require_llm=True)
+        if not result.get("ok"):
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": result.get("error") or "recommendation_failed",
+                    "message": result.get("message") or "推荐任务失败",
+                    "artifactPath": str(artifact_path),
+                    "llmRequired": True,
+                    "llmEnabled": llm_config.enabled,
+                    "llmModel": llm_config.model if llm_config.enabled else "",
+                    "llmTransport": llm_config.transport if llm_config.enabled else "",
+                }
+            ), 409
+        return jsonify(
+            {
+                "ok": True,
+                "artifactPath": str(artifact_path),
+                "source": result.get("source", "python-llm"),
+                "llmRequired": True,
+                "llmEnabled": llm_config.enabled,
+                "llmModel": llm_config.model if llm_config.enabled else "",
+                "llmTransport": llm_config.transport if llm_config.enabled else "",
+                "recommendation": result,
+            }
+        )
 
     @app.route("/", methods=["GET", "POST"])
     def index():
@@ -141,6 +318,91 @@ def _screenshots(result: Dict[str, Any]) -> list[str]:
     return paths[-6:]
 
 
+def _observation_from_extension(data: Dict[str, Any]) -> Observation:
+    elements = []
+    for item in data.get("elements", []) if isinstance(data.get("elements"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        elements.append(
+            Element(
+                id=str(item.get("id") or ""),
+                tag=str(item.get("tag") or ""),
+                selector=str(item.get("selector") or ""),
+                role=str(item.get("role") or ""),
+                type=str(item.get("type") or ""),
+                name=str(item.get("name") or ""),
+                label=str(item.get("label") or ""),
+                text=str(item.get("text") or ""),
+                placeholder=str(item.get("placeholder") or ""),
+                href=str(item.get("href") or ""),
+                value=str(item.get("value") or ""),
+                form_id=str(item.get("formId") or item.get("form_id") or ""),
+                section_label=str(item.get("sectionLabel") or item.get("section_label") or ""),
+                visible=bool(item.get("visible", True)),
+                enabled=bool(item.get("enabled", True)),
+                bbox={key: float(value) for key, value in dict(item.get("bbox") or {}).items()},
+                content_editable=bool(item.get("contentEditable", False)),
+                clickable=bool(item.get("clickable", False)),
+            )
+        )
+    return Observation(
+        url=str(data.get("url") or ""),
+        title=str(data.get("title") or ""),
+        text=str(data.get("text") or ""),
+        elements=elements,
+        cards=[item for item in data.get("cards", []) if isinstance(item, dict)][:20] if isinstance(data.get("cards"), list) else [],
+        tables=[item for item in data.get("tables", []) if isinstance(item, list)][:6] if isinstance(data.get("tables"), list) else [],
+        links=[item for item in data.get("links", []) if isinstance(item, dict)][:40] if isinstance(data.get("links"), list) else [],
+        emails=[str(item) for item in data.get("emails", [])][:20] if isinstance(data.get("emails"), list) else [],
+        prices=[str(item) for item in data.get("prices", [])][:20] if isinstance(data.get("prices"), list) else [],
+        headings=[str(item) for item in data.get("headings", [])][:20] if isinstance(data.get("headings"), list) else [],
+    )
+
+
+def _task_mode(task: str) -> str:
+    return "recommendation" if _is_recommendation_task(task) else "general"
+
+
+def _is_recommendation_task(task: str) -> bool:
+    text = str(task or "")
+    return bool(
+        __import__("re").search(
+            r"推荐|对比|比较|性价比|耳机|手机|笔记本|电脑|camera|headphone|recommend|compare|rank",
+            text,
+            __import__("re").I,
+        )
+    )
+
+
+def _llm_failure_code(error_text: str) -> str:
+    lowered = str(error_text or "").lower()
+    if "timeout" in lowered:
+        return "llm_timeout"
+    if "invalid_grant" in lowered:
+        return "llm_invalid_grant"
+    if "auth_unavailable" in lowered:
+        return "llm_provider_unavailable"
+    if "model_not_found" in lowered:
+        return "llm_model_not_found"
+    return "task_failed_llm_required"
+
+
+def _persist_recommendation_payload(task: str, observation: Dict[str, Any], execution: Dict[str, Any], memory: Dict[str, Any]) -> Path:
+    base = Path.cwd() / "runs" / "recommendation"
+    base.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    path = base / f"recommend-{stamp}.json"
+    payload = {
+        "task": task,
+        "savedAt": datetime.now().isoformat(),
+        "observation": observation if isinstance(observation, dict) else {},
+        "execution": execution if isinstance(execution, dict) else {},
+        "memory": memory if isinstance(memory, dict) else {},
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
 TEMPLATE = """
 <!doctype html>
 <html lang="zh-CN">
@@ -221,6 +483,10 @@ TEMPLATE = """
             <div class="pill">连接状态：{{ result.connectionStatus }}</div>
             <div class="pill">最终 URL：{{ result.execution.url }}</div>
           </div>
+          {% if result.workflow %}
+            <h2>Workflow</h2>
+            <pre>{{ pretty(result.workflow) }}</pre>
+          {% endif %}
           {% if screenshots %}
             <h2>Observation Screenshots</h2>
             <div class="shots">

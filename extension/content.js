@@ -4,7 +4,11 @@ let lastAgentArtifact = "";
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "COLLECT_OBSERVATION") {
-    sendResponse({ ok: true, observation: collectObservation() });
+    try {
+      sendResponse({ ok: true, observation: collectObservation() });
+    } catch (error) {
+      sendResponse({ ok: false, error: String(error) });
+    }
     return true;
   }
 
@@ -25,7 +29,17 @@ function collectObservation() {
     url: location.href,
     title: document.title,
     text: visibleText(document.body).slice(0, 5000),
-    elements
+    elements,
+    headings: Array.from(document.querySelectorAll("h1, h2, h3"))
+      .filter(isVisible)
+      .map((node) => visibleText(node))
+      .filter(Boolean)
+      .slice(0, 20),
+    links: collectStructuredData("links").items.slice(0, 40),
+    cards: collectCards().slice(0, 20),
+    tables: collectTables().slice(0, 4),
+    emails: Array.from(new Set((visibleText(document.body).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || []))).slice(0, 20),
+    prices: Array.from(new Set((visibleText(document.body).match(/(?:¥|\$|￥)\s?\d+(?:\.\d{1,2})?/g) || []))).slice(0, 20)
   };
 }
 
@@ -54,15 +68,22 @@ function collectInteractiveElements() {
       return {
         id,
         tag: element.tagName.toLowerCase(),
+        selector: cssSelectorFor(element),
         role: element.getAttribute("role") || implicitRole(element),
         type: element.getAttribute("type") || "",
         name: element.getAttribute("name") || "",
         label: labelFor(element),
         text: visibleText(element).slice(0, 160),
         placeholder: element.getAttribute("placeholder") || "",
+        href: element.href || element.getAttribute("href") || "",
+        value: "value" in element ? String(element.value || "") : "",
+        formId: element.closest("form")?.id || "",
+        sectionLabel: sectionLabelFor(element),
+        visible: true,
+        enabled: !element.disabled && element.getAttribute("aria-disabled") !== "true",
         contentEditable: element.isContentEditable,
         clickable: Boolean(element.onclick || element.getAttribute("onclick")),
-        rect: {
+        bbox: {
           x: Math.round(rect.x),
           y: Math.round(rect.y),
           width: Math.round(rect.width),
@@ -72,14 +93,38 @@ function collectInteractiveElements() {
     });
 }
 
+function cssSelectorFor(element) {
+  if (element.id) return `#${CSS.escape(element.id)}`;
+  if (element.name) return `${element.tagName.toLowerCase()}[name="${String(element.name).replace(/"/g, '\\"')}"]`;
+  const aria = element.getAttribute("aria-label");
+  if (aria) return `${element.tagName.toLowerCase()}[aria-label="${String(aria).replace(/"/g, '\\"')}"]`;
+  const href = element.getAttribute("href");
+  if (href) return `${element.tagName.toLowerCase()}[href="${String(href).replace(/"/g, '\\"')}"]`;
+  return element.tagName.toLowerCase();
+}
+
+function sectionLabelFor(element) {
+  const parent = element.closest("section, article, form, main");
+  if (!parent) return "";
+  const aria = parent.getAttribute("aria-label");
+  if (aria) return aria.trim();
+  const heading = parent.querySelector("h1, h2, h3");
+  return heading ? visibleText(heading) : "";
+}
+
 async function executePlan(plan) {
   ensureStyles();
   const logs = [];
+  let needsFollowUp = false;
   for (const action of plan.actions || []) {
     const startedAt = new Date().toISOString();
     try {
       const output = await executeAction(action);
       logs.push({ ...action, ok: true, output, timestamp: startedAt });
+      if (action.type === "navigate") {
+        needsFollowUp = true;
+        break;
+      }
     } catch (error) {
       logs.push({ ...action, ok: false, error: String(error), timestamp: startedAt });
       break;
@@ -89,13 +134,18 @@ async function executePlan(plan) {
   return {
     url: location.href,
     logs,
+    needsFollowUp,
     finishedAt: new Date().toISOString()
   };
 }
 
 async function executeAction(action) {
   if (action.type === "navigate") {
-    location.href = action.value;
+    const targetUrl = String(action.value || "").trim();
+    if (!targetUrl) return "navigated";
+    window.setTimeout(() => {
+      location.assign(targetUrl);
+    }, 40);
     return "navigated";
   }
 
@@ -123,6 +173,9 @@ async function executeAction(action) {
   }
 
   if (action.type === "collect") {
+    if ((action.value || "cards") === "cards") {
+      await ensureCardCandidatesReady();
+    }
     const artifact = collectStructuredData(action.value || "cards");
     lastAgentArtifact = JSON.stringify(artifact, null, 2);
     showAgentToast(lastAgentArtifact);
@@ -199,12 +252,26 @@ function setElementValue(element, value) {
     return;
   }
 
-  const prototype = element.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
-  if (descriptor?.set) {
-    descriptor.set.call(element, value);
-  } else {
+  const tag = String(element.tagName || "").toUpperCase();
+  if (tag === "INPUT") {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    if (descriptor?.set) {
+      descriptor.set.call(element, value);
+    } else {
+      element.value = value;
+    }
+  } else if (tag === "TEXTAREA") {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+    if (descriptor?.set) {
+      descriptor.set.call(element, value);
+    } else {
+      element.value = value;
+    }
+  } else if (tag === "SELECT") {
     element.value = value;
+  } else {
+    // Fallback for custom widgets with role=textbox and similar non-standard inputs.
+    element.textContent = value;
   }
   element.dispatchEvent(new Event("input", { bubbles: true }));
   element.dispatchEvent(new Event("change", { bubbles: true }));
@@ -479,9 +546,13 @@ function collectStructuredData(kind) {
 }
 
 function compareCards(command) {
-  const cards = collectCards();
+  const cards = collectCards().filter(isValidProductCard);
   if (cards.length < 2) {
-    return "没有找到足够的候选卡片用于比较。";
+    return [
+      "结果比较：",
+      "当前页面没有足够的商品候选项（已过滤导航/账号入口等噪声）。",
+      "建议：先执行搜索并打开 2-3 个商品详情页后再比较。"
+    ].join("\n");
   }
 
   const keyword = command
@@ -504,32 +575,49 @@ function compareCards(command) {
       ].filter(Boolean).join("，");
       return `${index + 1}. ${card.title}\n   ${meta}\n   ${card.summary}`;
     }),
-    `推荐：优先查看“${ranked[0].title}”，它在当前页面中与任务描述最匹配。`
+    `推荐：优先查看“${ranked[0].title}”，并继续打开其详情页核对参数、评价数量和价格波动。`
   ].join("\n");
 }
 
 function collectCards() {
-  const nodes = Array.from(document.querySelectorAll("[data-agent-result], [data-agent-card], article, .result, .card, li"))
-    .filter(isVisible);
+  const jdCandidates = collectJdSearchCards();
+  if (jdCandidates.length >= 2) {
+    return rankCards(jdCandidates).slice(0, 24);
+  }
+  const selectors = [
+    "[data-agent-result]",
+    "[data-agent-card]",
+    "[data-sku]",
+    ".gl-item",
+    ".sku-item",
+    ".good-item",
+    "[class*='product']",
+    "[class*='goods']",
+    "[class*='sku']",
+    ".result",
+    ".card",
+    "article",
+    "section"
+  ].join(",");
+  const nodes = Array.from(document.querySelectorAll(selectors)).filter(isVisible);
 
+  const cards = nodes
+    .map((node) => normalizeCard(node))
+    .filter((card) => isValidProductCard(card))
+    .filter(uniqueByHrefOrTitle)
+    .slice(0, 36);
+
+  return rankCards(cards).slice(0, 24);
+}
+
+function collectJdSearchCards() {
+  const nodes = Array.from(document.querySelectorAll(".gl-item, li.gl-item, [data-sku], .j-sku-item"));
+  if (!nodes.length) return [];
   return nodes
-    .map((node) => {
-      const title = visibleText(node.querySelector("h1, h2, h3, a, strong")) || visibleText(node).slice(0, 60);
-      const text = visibleText(node);
-      const price = text.match(/(?:¥|\$|￥)\s?\d+(?:\.\d{1,2})?/)?.[0] || "";
-      const rating = text.match(/(?:评分|rating|score)[:： ]?\s?([0-9](?:\.[0-9])?)/i)?.[1] || "";
-      const link = node.querySelector("a[href]")?.href || "";
-      return {
-        title,
-        summary: text.replace(title, "").trim().slice(0, 220),
-        price,
-        rating,
-        href: link
-      };
-    })
-    .filter((card) => card.title && card.summary)
-    .filter(uniqueByTitle)
-    .slice(0, 24);
+    .map((node) => normalizeCard(node))
+    .filter((card) => isValidProductCard(card))
+    .filter(uniqueByHrefOrTitle)
+    .slice(0, 48);
 }
 
 function scoreCard(card, keyword) {
@@ -538,13 +626,87 @@ function scoreCard(card, keyword) {
   const keywordScore = tokens.reduce((sum, token) => sum + (text.includes(token) ? 3 : 0), 0);
   const ratingScore = Number(card.rating || 0);
   const contentScore = Math.min(6, Math.floor(card.summary.length / 40));
-  return keywordScore + ratingScore + contentScore;
+  const priceScore = card.price ? 2 : 0;
+  const detailScore = card.href && !/^javascript:/i.test(card.href) ? 2 : 0;
+  return keywordScore + ratingScore + contentScore + priceScore + detailScore;
+}
+
+function normalizeCard(node) {
+  const text = robustNodeText(node);
+  const titleNode = node.querySelector(
+    ".p-name em, .title, .name, .goods-name, .product-title, h1, h2, h3, h4, a[title], strong, b, em"
+  );
+  const title = (
+    (titleNode ? visibleText(titleNode) : "")
+    || node.querySelector("a[title]")?.getAttribute("title")
+    || text.slice(0, 80)
+  ).trim();
+  const priceNode = node.querySelector(".p-price, .price, [class*='price'], [data-price]");
+  const priceText = robustNodeText(priceNode || node);
+  const price = priceText.match(/(?:¥|\$|￥)\s?\d+(?:\.\d{1,2})?/)?.[0] || "";
+  const rating = text.match(/(?:评分|rating|score)[:： ]?\s?([0-9](?:\.[0-9])?)/i)?.[1] || "";
+  const link = resolveDetailLink(node);
+  const summary = text.replace(title, "").replace(price, "").trim().slice(0, 260);
+
+  return {
+    title,
+    summary,
+    price,
+    rating,
+    href: link
+  };
+}
+
+function resolveDetailLink(node) {
+  const anchors = Array.from(node.querySelectorAll("a[href]"));
+  for (const anchor of anchors) {
+    const href = anchor.href || anchor.getAttribute("href") || "";
+    if (!href || /^javascript:/i.test(href)) continue;
+    if (/item\.jd\.com|detail|product|sku|goods|dp\/|\/item\//i.test(href)) return href;
+  }
+  const fallback = anchors.find((a) => (a.href || "").startsWith("http"));
+  return fallback?.href || "";
+}
+
+function isValidProductCard(card) {
+  if (!card.title || card.title.length < 2) return false;
+  if (isNavLikeTitle(card.title)) return false;
+  if (!card.price && card.summary.length < 18) return false;
+  if (card.href && /^javascript:/i.test(card.href)) return false;
+  if (!card.href && !card.price) return false;
+  return true;
+}
+
+function isNavLikeTitle(title) {
+  return /首页|登录|注册|我的京东|企业采购|网站导航|客服|地区|消息|购物车|帮助中心|全部分类|更多/i.test(title);
+}
+
+function rankCards(cards) {
+  return cards
+    .map((card) => {
+      let base = 0;
+      if (card.price) base += 4;
+      if (card.rating) base += 2;
+      if (card.href) base += 3;
+      if (card.summary.length > 40) base += 1;
+      return { ...card, _baseScore: base };
+    })
+    .sort((a, b) => b._baseScore - a._baseScore)
+    .map(({ _baseScore, ...card }) => card);
 }
 
 function tableToObject(table) {
   return Array.from(table.querySelectorAll("tr")).map((row) =>
     Array.from(row.querySelectorAll("th, td")).map((cell) => visibleText(cell))
   );
+}
+
+function collectTables() {
+  return Array.from(document.querySelectorAll("table"))
+    .filter(isVisible)
+    .map(tableToObject)
+    .filter((rows) => rows.length > 0)
+    .slice(0, 6);
 }
 
 function uniqueByText(text, index, all) {
@@ -559,11 +721,22 @@ function uniqueByTitle(item, index, all) {
   return all.findIndex((other) => other.title === item.title) === index;
 }
 
+function uniqueByHrefOrTitle(item, index, all) {
+  return all.findIndex((other) => {
+    if (item.href && other.href) return other.href === item.href;
+    return other.title === item.title;
+  }) === index;
+}
+
 async function copyText(text) {
   if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    showAgentToast(`已复制到剪贴板：\n\n${text.slice(0, 1000)}`);
-    return;
+    try {
+      await navigator.clipboard.writeText(text);
+      showAgentToast(`已复制到剪贴板：\n\n${text.slice(0, 1000)}`);
+      return;
+    } catch (_error) {
+      // Fallback to execCommand when the page is not focused.
+    }
   }
 
   const textarea = document.createElement("textarea");
@@ -642,6 +815,40 @@ function isVisible(element) {
     && rect.right >= 0
     && rect.top <= window.innerHeight
     && rect.left <= window.innerWidth;
+}
+
+function isProbablyRenderable(element) {
+  const style = window.getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
+  return style.visibility !== "hidden"
+    && style.display !== "none"
+    && rect.width > 6
+    && rect.height > 6;
+}
+
+function robustNodeText(node) {
+  if (!node) return "";
+  const inner = String(node.innerText || "").replace(/\s+/g, " ").trim();
+  if (inner) return inner;
+  return String(node.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+async function ensureCardCandidatesReady() {
+  let cards = collectCards();
+  if (cards.length >= 2) return cards;
+  const startY = window.scrollY;
+  window.scrollBy({ top: Math.max(window.innerHeight, 900), behavior: "auto" });
+  await delay(600);
+  cards = collectCards();
+  if (cards.length >= 2) {
+    window.scrollTo({ top: startY, behavior: "auto" });
+    return cards;
+  }
+  window.scrollBy({ top: Math.max(window.innerHeight, 900), behavior: "auto" });
+  await delay(700);
+  cards = collectCards();
+  window.scrollTo({ top: startY, behavior: "auto" });
+  return cards;
 }
 
 function visibleText(node) {

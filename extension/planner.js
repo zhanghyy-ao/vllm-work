@@ -45,7 +45,7 @@ function planTask(command, observation) {
   }
 
   if (isCompareTask(text)) {
-    return planCompare(text);
+    return planCompare(text, observation);
   }
 
   if (isFormTask(text)) {
@@ -305,8 +305,83 @@ function planCollect(command) {
   ]);
 }
 
-function planCompare(command) {
-  return makePlan("比较页面中的结果卡片并给出简短推荐。", 0.68, [
+function planCompare(command, observation) {
+  const focus = cleanCompareFocus(command);
+  const hasEnoughCards = (observation?.cards || []).length >= 3;
+  const elements = observation?.elements || [];
+  const searchInput = bestElement(elements, ["search", "搜索", "查找", "query", "关键词", "耳机"], isTextInput);
+  const searchSubmit = bestElement(elements, ["搜索", "查找", "search"], isClickable);
+
+  if (!hasEnoughCards) {
+    if (searchInput) {
+      const actions = [
+        {
+          type: "type",
+          targetId: searchInput.id,
+          value: focus || command,
+          reason: `候选不足，先在页面内搜索“${focus || command}”。`
+        }
+      ];
+      if (searchSubmit) {
+        actions.push({
+          type: "click",
+          targetId: searchSubmit.id,
+          reason: "点击页面内搜索按钮。"
+        });
+      } else {
+        actions.push({
+          type: "press",
+          targetId: searchInput.id,
+          key: "Enter",
+          reason: "未识别到搜索按钮，使用 Enter 提交。"
+        });
+      }
+      actions.push(
+        {
+          type: "collect",
+          value: "cards",
+          reason: "收集搜索结果中的商品候选卡片。"
+        },
+        {
+          type: "compare",
+          value: command,
+          reason: "对候选进行比较并给出推荐。"
+        },
+        {
+          type: "copy",
+          reason: "将比较结果复制到剪贴板。"
+        }
+      );
+      return makePlan("当前页候选不足，已切换为页面内搜索+比较流程。", 0.82, actions);
+    }
+    return makePlan("当前页面候选不足，先搜索再比较。", 0.76, [
+      {
+        type: "navigate",
+        value: `${DEFAULT_SEARCH_URL}${encodeURIComponent(focus || command)}`,
+        reason: `先搜索“${focus || command}”，收集真实候选。`
+      },
+      {
+        type: "collect",
+        value: "cards",
+        reason: "收集搜索结果中的商品候选卡片。"
+      },
+      {
+        type: "compare",
+        value: command,
+        reason: "对候选进行比较并给出推荐。"
+      },
+      {
+        type: "copy",
+        reason: "将比较结果复制到剪贴板。"
+      }
+    ]);
+  }
+  return makePlan("比较页面中的结果卡片并给出简短推荐。", 0.7, [
+    {
+      type: "collect",
+      value: "cards",
+      reason: "先刷新候选卡片，避免用到旧页面缓存。"
+    },
     {
       type: "compare",
       value: command,
@@ -317,6 +392,13 @@ function planCompare(command) {
       reason: "将比较结果复制到剪贴板。"
     }
   ]);
+}
+
+function cleanCompareFocus(command) {
+  return command
+    .replace(/帮我|请|比较|对比|排序|哪个更好|哪个更适合|推荐|这些|方案|产品|工具|compare|rank/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function planClickOrExtract(command, observation, elements) {
