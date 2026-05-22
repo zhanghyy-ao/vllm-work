@@ -9,6 +9,7 @@ from .schema import Action, Observation
 
 @dataclass
 class AgentMemory:
+    """Shared memory across rounds/branches for search, sampling, and recommendation context."""
     task: str
     search_queries: List[str] = field(default_factory=list)
     visited_urls: List[str] = field(default_factory=list)
@@ -25,6 +26,7 @@ class AgentMemory:
     closed_branches: List[Dict[str, Any]] = field(default_factory=list)
 
     def remember(self, action: Action, observation: Observation, output: Any = None, artifact: str = "") -> None:
+        """Append lightweight behavioral memory after each action execution."""
         if observation.url and observation.url not in self.visited_urls:
             self.visited_urls.append(observation.url)
 
@@ -99,6 +101,7 @@ class AgentMemory:
             self.notes = self.notes[-20:]
 
     def merge_branch_result(self, branch_result: Dict[str, Any]) -> None:
+        """Merge parallel branch outputs into global candidate/evidence pools."""
         branch_id = str(branch_result.get("branchId") or branch_result.get("branch_id") or "")
         worker_id = str(branch_result.get("workerId") or branch_result.get("worker_id") or "")
         data = branch_result.get("data") if isinstance(branch_result.get("data"), dict) else {}

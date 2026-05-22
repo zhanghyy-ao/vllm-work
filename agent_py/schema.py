@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class Element:
+    """Normalized interactive element descriptor shared by planners and executors."""
     id: str
     tag: str
     selector: str = ""
@@ -49,6 +50,7 @@ class Element:
 
 @dataclass
 class Observation:
+    """Snapshot of current page state used as agent perception input."""
     url: str
     title: str
     text: str
@@ -65,6 +67,7 @@ class Observation:
 
 @dataclass
 class Action:
+    """Atomic action requested by planner and consumed by executors."""
     type: str
     target_id: Optional[str] = None
     value: Any = None
@@ -102,6 +105,7 @@ class Action:
 
 @dataclass
 class Plan:
+    """Planner output: summary, confidence, warnings, ordered action list."""
     summary: str
     confidence: float
     actions: List[Action]
@@ -128,6 +132,7 @@ class Plan:
 
 @dataclass
 class ActionResult:
+    """Execution status for one action."""
     action: Action
     ok: bool
     output: Any = None
@@ -148,6 +153,7 @@ class ActionResult:
 
 @dataclass
 class ExecutionResult:
+    """Aggregated execution logs and artifact for a run or round."""
     url: str
     logs: List[ActionResult]
     artifact: str = ""

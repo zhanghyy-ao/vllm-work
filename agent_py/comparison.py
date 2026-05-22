@@ -15,6 +15,7 @@ def generate_comparison(
     memory: Optional[AgentMemory] = None,
     llm_config: Optional[LLMConfig] = None,
 ) -> str:
+    """Return human-readable comparison text from current page + memory candidates."""
     candidates = build_candidate_set(observation, memory)
     if len(candidates) < 2:
         return "没有找到足够的候选项用于比较。"
@@ -31,6 +32,7 @@ def recommend_from_observation(
     llm_config: Optional[LLMConfig] = None,
     require_llm: bool = True,
 ) -> Dict[str, Any]:
+    """Return structured recommendation object; can enforce LLM-required mode."""
     candidates = build_candidate_set(observation, memory)
     if len(candidates) < 2:
         return {
@@ -81,6 +83,7 @@ def recommend_from_observation(
 
 
 def build_candidate_set(observation: Observation, memory: Optional[AgentMemory] = None) -> List[Dict[str, Any]]:
+    """Aggregate and normalize candidates from cards, tables, and memory snapshots."""
     candidates: List[Dict[str, Any]] = []
     seen = set()
     for card in observation.cards:
@@ -115,6 +118,7 @@ def select_sampling_candidates(
     memory: Optional[AgentMemory] = None,
     limit: int = 3,
 ) -> List[Dict[str, Any]]:
+    """Pick top candidate detail URLs for follow-up sampling."""
     focus = _clean_compare_focus(command)
     candidates = build_candidate_set(observation, memory)
     ranked = sorted(candidates, key=lambda item: _score_candidate(item, focus, command), reverse=True)

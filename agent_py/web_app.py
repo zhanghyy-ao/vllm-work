@@ -23,6 +23,7 @@ LAST_RESULT: Dict[str, Any] = {}
 
 
 def create_app():
+    """Create Flask app for extension APIs and local demo UI."""
     try:
         from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, send_file, url_for
     except ImportError as exc:  # pragma: no cover
@@ -56,6 +57,7 @@ def create_app():
 
     @app.route("/api/extension/plan", methods=["POST", "OPTIONS"])
     def extension_plan():
+        """Build a plan from observation; recommendation tasks may enforce LLM-only planning."""
         if request.method == "OPTIONS":
             return Response(status=204)
         payload = request.get_json(silent=True) or {}
@@ -144,6 +146,7 @@ def create_app():
 
     @app.route("/api/extension/recommend", methods=["POST", "OPTIONS"])
     def extension_recommend():
+        """Persist recommendation payload to JSON and produce LLM-based comparison result."""
         if request.method == "OPTIONS":
             return Response(status=204)
         payload = request.get_json(silent=True) or {}

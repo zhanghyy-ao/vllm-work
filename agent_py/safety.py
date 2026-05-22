@@ -24,11 +24,13 @@ ALLOWED_ACTION_TYPES = {
     "wait",
 }
 
+# Generic high-risk verbs. These are blocked unless explicitly allowed.
 HIGH_RISK_PATTERN = re.compile(
     r"提交|发送|删除|付款|支付|发布|上传|下单|购买|确认|submit|send|delete|pay|purchase|publish|upload|checkout|confirm",
     re.I,
 )
 
+# Hard-risk actions are always blocked or converted, even with explicit submit enabled.
 HARD_RISK_PATTERN = re.compile(
     r"删除|付款|支付|上传|下单|购买|结账|密码|验证码|授权|delete|pay|purchase|upload|checkout|password|captcha|otp|permission",
     re.I,
@@ -36,6 +38,7 @@ HARD_RISK_PATTERN = re.compile(
 
 
 def sanitize_plan(plan: Plan, observation: Observation, allow_explicit_submit: bool = False) -> Plan:
+    """Validate action schema, drop invalid targets, and apply risk guardrails."""
     valid_ids = {element.id for element in observation.elements}
     actions: List[Action] = []
     warnings = list(plan.warnings)
@@ -61,6 +64,7 @@ def sanitize_plan(plan: Plan, observation: Observation, allow_explicit_submit: b
 
 
 def guard_action(action: Action, observation: Observation, allow_explicit_submit: bool = False) -> Tuple[Action, List[str]]:
+    """Convert risky click/press actions into safe highlight actions when needed."""
     target_text = _target_haystack(action, observation)
     action_text = f"{action.type} {action.value or ''} {action.reason} {target_text}"
     if (

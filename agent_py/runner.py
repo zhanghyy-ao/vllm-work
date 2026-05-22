@@ -23,6 +23,7 @@ from .workflow import BranchResult, build_workflow_controller, is_parallel_workf
 
 @dataclass
 class AgentRunResult:
+    """Final run artifact returned by CLI/Web API with plan, execution, and metadata."""
     task: str
     url: str
     plan: Plan
@@ -72,6 +73,7 @@ class BrowserAgentRunner:
         self.allow_explicit_submit = allow_explicit_submit
 
     def run(self, url: str, task: str) -> AgentRunResult:
+        """Main entry: multi-round observe/plan/execute loop with memory and workflow state."""
         memory = AgentMemory(task=task)
         with PlaywrightBrowserRuntime(
             headless=self.headless,

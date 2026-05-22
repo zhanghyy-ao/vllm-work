@@ -11,6 +11,7 @@ DEFAULT_SEARCH_URL = "https://www.bing.com/search?q="
 
 
 def plan_task(command: str, observation: Observation) -> Plan:
+    """Rule-based planner fallback covering common web tasks."""
     text = (command or "").strip()
     if not text:
         return Plan("请输入任务指令。", 0.0, [])

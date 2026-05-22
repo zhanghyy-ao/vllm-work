@@ -21,6 +21,7 @@ PHASES = [
 
 @dataclass
 class WorkflowTask:
+    """A phase task that can run serially or as a parallel branch."""
     task_id: str
     phase: str
     title: str
@@ -57,6 +58,7 @@ class WorkflowTask:
 
 @dataclass
 class WorkerState:
+    """Runtime state of one parallel worker bound to a branch/tab/context."""
     worker_id: str
     branch_id: str
     status: str
@@ -77,6 +79,7 @@ class WorkerState:
 
 @dataclass
 class BranchResult:
+    """Structured output emitted by a branch worker for memory merge."""
     branch_id: str
     worker_id: str
     status: str

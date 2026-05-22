@@ -58,6 +58,7 @@ class Node:
 
 
 class TreeParser(HTMLParser):
+    """Minimal DOM tree builder used by offline HTML observer."""
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.root = Node("document")

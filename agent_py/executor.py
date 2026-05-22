@@ -14,6 +14,7 @@ from .schema import Action, ActionResult, Element, ExecutionResult, Observation,
 
 @dataclass
 class BrowserHarness:
+    """Deterministic in-memory harness for unit tests and offline execution checks."""
     observation: Observation
     llm_config: Optional[LLMConfig] = None
     memory: Optional[AgentMemory] = None
@@ -24,6 +25,7 @@ class BrowserHarness:
     synthetic_blocks: List[str] = field(default_factory=list)
 
     def run(self, plan: Plan) -> ExecutionResult:
+        """Execute plan sequentially and stop on first failure."""
         logs: List[ActionResult] = []
         for action in plan.actions:
             try:
@@ -35,6 +37,7 @@ class BrowserHarness:
         return ExecutionResult(url=self.observation.url, logs=logs, artifact=self.artifact)
 
     def execute(self, action: Action) -> Any:
+        """Execute a single action against synthetic observation state."""
         if action.type == "navigate":
             self.observation.url = str(action.value)
             return {"url": self.observation.url}

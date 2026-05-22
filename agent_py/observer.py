@@ -14,6 +14,7 @@ INTERACTIVE_ROLES = {"button", "link", "textbox", "searchbox", "combobox", "menu
 
 
 def observe_html(html: str, url: str = "about:blank") -> Observation:
+    """Parse static HTML and build a normalized observation used by planners/executors."""
     root = parse_html(html)
     title_node = root.first(["title"])
     title = title_node.text() if title_node else ""

@@ -5,6 +5,7 @@ from pathlib import Path
 
 
 def load_dotenv(path: str | None = None) -> None:
+    """Load .env into process env without overriding existing variables."""
     env_path = Path(path) if path else Path.cwd() / ".env"
     if not env_path.exists():
         return

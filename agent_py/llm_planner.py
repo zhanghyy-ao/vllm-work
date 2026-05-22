@@ -14,6 +14,7 @@ from .safety import sanitize_plan, valid_action_types
 
 @dataclass
 class LLMConfig:
+    """Runtime LLM configuration loaded from .env or request overrides."""
     api_base: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = ""
@@ -39,6 +40,7 @@ class LLMConfig:
 
 
 def plan_with_llm(task: str, observation: Observation, config: LLMConfig, allow_explicit_submit: bool = False) -> Plan:
+    """Build a plan via LLM and run it through safety sanitization."""
     if not config.enabled:
         raise ValueError("LLM config is incomplete; api_key and model are required.")
     content = request_text_completion(
@@ -80,6 +82,7 @@ def _use_gemini_native_api(config: LLMConfig) -> bool:
 
 
 def request_text_completion(messages: List[Dict[str, str]], config: LLMConfig, temperature: Optional[float] = None) -> str:
+    """Unified text generation entry for OpenAI-compatible and Gemini-native transports."""
     if _use_gemini_native_api(config):
         return _call_gemini_messages(messages, config, temperature=temperature)
     payload = {
@@ -92,6 +95,7 @@ def request_text_completion(messages: List[Dict[str, str]], config: LLMConfig, t
 
 
 def _call_gemini_messages(messages: List[Dict[str, str]], config: LLMConfig, temperature: Optional[float] = None) -> str:
+    """Send prompt to Gemini generateContent API and return plain text response."""
     prompt = _messages_to_gemini_prompt(messages)
     payload = {
         "contents": [
@@ -238,6 +242,7 @@ def parse_plan(content: str) -> Plan:
 
 
 def _post_json(url: str, payload: Dict[str, Any], config: LLMConfig, include_auth: bool = True) -> Dict[str, Any]:
+    """HTTP JSON helper with retry and consistent error normalization."""
     try:
         import requests
         from requests.adapters import HTTPAdapter

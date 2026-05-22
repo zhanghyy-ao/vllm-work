@@ -29,6 +29,7 @@ INTERACTIVE_SELECTOR = ",".join(
 
 
 class PlaywrightBrowserRuntime:
+    """Live runtime wrapper around Playwright for real browser automation."""
     def __init__(
         self,
         headless: bool = False,
@@ -68,6 +69,7 @@ class PlaywrightBrowserRuntime:
         self.close()
 
     def start(self) -> None:
+        """Initialize Playwright and prefer CDP attach before launching temp Chromium."""
         if self.page:
             return
         self._playwright = self._sync_playwright().start()
@@ -101,6 +103,7 @@ class PlaywrightBrowserRuntime:
         return self.observe()
 
     def observe(self) -> Observation:
+        """Capture a fresh, normalized observation from the active page."""
         self._ensure_page()
         observation = self._build_observation(self.page, capture_screenshot=True)
         self.last_observation = observation
@@ -134,6 +137,7 @@ class PlaywrightBrowserRuntime:
         return path
 
     def run(self, plan: Plan) -> ExecutionResult:
+        """Execute actions sequentially, collecting per-step logs and observation trajectory."""
         logs = []
         trajectory = []
         for action in plan.actions:
@@ -154,6 +158,7 @@ class PlaywrightBrowserRuntime:
         return ExecutionResult(url=self.page.url if self.page else "", logs=logs, artifact=self.artifact, trajectory=trajectory)
 
     def execute(self, action: Action) -> Any:
+        """Execute a single action on the page and return structured action output."""
         self._ensure_page()
         if action.type == "navigate":
             self.page.goto(str(action.value), wait_until="domcontentloaded", timeout=30000)
