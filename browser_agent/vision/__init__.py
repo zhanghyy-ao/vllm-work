@@ -1,3 +1,11 @@
-from .grounding import locate_target
+"""Vision helpers for screenshots, key frames, and multimodal grounding."""
 
-__all__ = ["locate_target"]
+from .keyframes import extract_video_keyframes, visual_inputs_from_video_digest
+from .multimodal import GeminiVisionProvider, build_video_visual_prompt
+
+__all__ = [
+    "GeminiVisionProvider",
+    "build_video_visual_prompt",
+    "extract_video_keyframes",
+    "visual_inputs_from_video_digest",
+]
