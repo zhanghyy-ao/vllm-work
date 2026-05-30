@@ -1,0 +1,19 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+node_modules/
+
+# Local secrets. Commit `.env.example`, not real credentials.
+.env
+.env.*
+!.env.example
+
+# Generated browser-agent artifacts.
+runs/screenshots/
+runs/latest-report.md
+runs/latest-run-*.json
