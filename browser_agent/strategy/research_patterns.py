@@ -33,6 +33,36 @@ def github_reference_notes() -> List[Dict[str, str]]:
 
 def default_decision_criteria(domain: str, goal: str) -> List[Dict[str, str]]:
     text = goal.lower()
+    if domain == "form":
+        return [
+            {"name": "字段识别", "why_it_matters": "先确认页面上有哪些真实可填写字段", "evidence_to_collect": "表单项、必填项、占位符、校验提示"},
+            {"name": "填写安全", "why_it_matters": "避免提交账号、密码或敏感数据", "evidence_to_collect": "敏感字段、提交按钮、审批点"},
+            {"name": "完成验证", "why_it_matters": "填写后要确认页面状态是否满足目标", "evidence_to_collect": "错误提示、成功提示、字段回显"},
+        ]
+    if domain == "booking":
+        return [
+            {"name": "资源候选", "why_it_matters": "预订前要先找到可选资源", "evidence_to_collect": "房型、时间段、票档、库存"},
+            {"name": "限制条件", "why_it_matters": "价格、时间和规则直接决定是否可行", "evidence_to_collect": "价格、时间、取消规则、人数限制"},
+            {"name": "人工审批", "why_it_matters": "真正提交前必须停在人审点", "evidence_to_collect": "确认页、提交按钮、订单摘要"},
+        ]
+    if domain == "lead":
+        return [
+            {"name": "目标匹配", "why_it_matters": "线索需要符合行业和目标条件", "evidence_to_collect": "公司、职位、地区、业务标签"},
+            {"name": "结构化字段", "why_it_matters": "后续导出和使用依赖字段质量", "evidence_to_collect": "姓名、邮箱、职位、来源页"},
+            {"name": "可追溯性", "why_it_matters": "线索要能回到来源核查", "evidence_to_collect": "来源链接、摘录、页面快照"},
+        ]
+    if domain == "monitoring":
+        return [
+            {"name": "目标状态", "why_it_matters": "监控需要明确当前页面是否达标", "evidence_to_collect": "价格、库存、状态文本、更新时间"},
+            {"name": "变化线索", "why_it_matters": "要知道什么变化值得继续动作", "evidence_to_collect": "阈值、变更项、警报条件"},
+            {"name": "持续观察", "why_it_matters": "不是一次检查，而是循环确认", "evidence_to_collect": "监视轨迹、后续页面动作、最终状态"},
+        ]
+    if domain == "qa":
+        return [
+            {"name": "关键路径", "why_it_matters": "回归测试要覆盖真正影响使用的主流程", "evidence_to_collect": "按钮、输入框、跳转、错误提示"},
+            {"name": "断言证据", "why_it_matters": "需要明确什么算通过或失败", "evidence_to_collect": "可见 UI 状态、页面文本、结果页"},
+            {"name": "失败定位", "why_it_matters": "发现问题后要能快速复现", "evidence_to_collect": "步骤轨迹、截图、失败页面"},
+        ]
     if domain == "shopping":
         return [
             {"name": "预算/价格", "why_it_matters": "推荐必须满足用户预算并比较性价比", "evidence_to_collect": "价格区间、促销、保修与平台来源"},
@@ -73,6 +103,36 @@ def default_decision_criteria(domain: str, goal: str) -> List[Dict[str, str]]:
 
 
 def default_search_plan(domain: str, goal: str) -> List[Dict[str, str]]:
+    if domain == "form":
+        return [
+            {"query": f"{goal} form page fields required hints", "purpose": "识别表单字段、必填项和占位提示", "source": "general", "evidence_stage": "form_fields"},
+            {"query": f"{goal} validation errors submit confirmation", "purpose": "识别校验提示、成功提示和提交风险", "source": "general", "evidence_stage": "form_validation"},
+            {"query": f"{goal} safe draft fill review", "purpose": "确保只做草稿填写并在提交前停下", "source": "general", "evidence_stage": "approval_gate"},
+        ]
+    if domain == "booking":
+        return [
+            {"query": f"{goal} available slots rooms tickets price", "purpose": "建立可预订资源候选池", "source": "general", "evidence_stage": "booking_inventory"},
+            {"query": f"{goal} filters price time cancellation policy", "purpose": "核对时间、价格和规则限制", "source": "general", "evidence_stage": "booking_constraints"},
+            {"query": f"{goal} confirmation page review before submit", "purpose": "进入确认页但不提交", "source": "general", "evidence_stage": "approval_gate"},
+        ]
+    if domain == "lead":
+        return [
+            {"query": f"{goal} companies contacts emails titles", "purpose": "建立线索候选池", "source": "general", "evidence_stage": "lead_candidates"},
+            {"query": f"{goal} structured fields email title location", "purpose": "补齐结构化字段", "source": "general", "evidence_stage": "lead_fields"},
+            {"query": f"{goal} source page verification", "purpose": "保留来源和可追溯证据", "source": "general", "evidence_stage": "lead_verification"},
+        ]
+    if domain == "monitoring":
+        return [
+            {"query": f"{goal} current price stock status", "purpose": "抓取当前基线状态", "source": "general", "evidence_stage": "baseline_state"},
+            {"query": f"{goal} threshold change alert condition", "purpose": "明确继续监视的触发条件", "source": "general", "evidence_stage": "alert_conditions"},
+            {"query": f"{goal} follow-up page checks", "purpose": "设计后续继续观察和补动作的线索", "source": "general", "evidence_stage": "monitor_follow_up"},
+        ]
+    if domain == "qa":
+        return [
+            {"query": f"{goal} critical path ui elements", "purpose": "识别关键页面元素和主流程", "source": "general", "evidence_stage": "qa_checkpoints"},
+            {"query": f"{goal} expected success error states", "purpose": "明确通过/失败判据", "source": "general", "evidence_stage": "qa_assertions"},
+            {"query": f"{goal} bug evidence screenshot reproduction", "purpose": "准备失败定位和复现证据", "source": "general", "evidence_stage": "qa_bug_evidence"},
+        ]
     if domain == "video":
         return [
             {"query": f"{goal} video tutorial explanation", "purpose": "寻找主题相关视频候选和讲解来源", "source": "video", "evidence_stage": "video_candidates"},

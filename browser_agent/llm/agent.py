@@ -326,8 +326,8 @@ def _normalize_dynamic_decision(result: Dict[str, Any], workflow: WorkflowSpec, 
         return {"ok": False, "reason": "sensitive_dynamic_action_requires_human_approval"}
     inputs = raw_action.get("inputs") if isinstance(raw_action.get("inputs"), dict) else {}
     source = str(inputs.get("source") or workflow.domain or "general")
-    if source not in {"github", "paper", "shopping", "video", "general"}:
-        source = workflow.domain if workflow.domain in {"github", "paper", "shopping", "video"} else "general"
+    if source not in {"github", "paper", "shopping", "video", "general", "form", "booking", "lead", "monitoring", "qa"}:
+        source = workflow.domain if workflow.domain in {"github", "paper", "shopping", "video", "form", "booking", "lead", "monitoring", "qa"} else "general"
     normalized_inputs: Dict[str, Any] = {"source": source}
     if inputs.get("evidence_stage"):
         normalized_inputs["evidence_stage"] = str(inputs.get("evidence_stage"))
@@ -793,8 +793,8 @@ def _normalize_search_plan(result: Dict[str, Any], workflow: WorkflowSpec) -> Li
             if not query:
                 continue
             source = str(item.get("source") or workflow.domain or "general").strip()
-            if source not in {"github", "paper", "shopping", "video", "general"}:
-                source = workflow.domain if workflow.domain in {"github", "paper", "shopping", "video"} else "general"
+            if source not in {"github", "paper", "shopping", "video", "general", "form", "booking", "lead", "monitoring", "qa"}:
+                source = workflow.domain if workflow.domain in {"github", "paper", "shopping", "video", "form", "booking", "lead", "monitoring", "qa"} else "general"
             items.append(
                 {
                     "query": _guard_query(workflow.domain, workflow.goal, query),
@@ -866,6 +866,36 @@ def _infer_evidence_stage(item: Dict[str, Any], domain: str) -> str:
         if any(token in text for token in ["comment", "discussion", "评论", "讨论"]):
             return "comments_discussion"
         return "video_candidates"
+    if domain == "form":
+        if any(token in text for token in ["error", "validation", "required", "必填", "校验"]):
+            return "form_validation"
+        if any(token in text for token in ["submit", "confirm", "审批", "提交", "确认"]):
+            return "approval_gate"
+        return "form_fields"
+    if domain == "booking":
+        if any(token in text for token in ["policy", "cancel", "price", "time", "规则", "取消", "价格", "时间"]):
+            return "booking_constraints"
+        if any(token in text for token in ["confirm", "submit", "review", "确认", "提交"]):
+            return "approval_gate"
+        return "booking_inventory"
+    if domain == "lead":
+        if any(token in text for token in ["email", "title", "location", "邮箱", "职位", "地区"]):
+            return "lead_fields"
+        if any(token in text for token in ["source", "profile", "verify", "来源", "主页", "核验"]):
+            return "lead_verification"
+        return "lead_candidates"
+    if domain == "monitoring":
+        if any(token in text for token in ["threshold", "alert", "condition", "阈值", "告警", "条件"]):
+            return "alert_conditions"
+        if any(token in text for token in ["follow", "monitor", "watch", "继续", "监控", "巡检"]):
+            return "monitor_follow_up"
+        return "baseline_state"
+    if domain == "qa":
+        if any(token in text for token in ["assert", "expected", "error", "成功", "失败", "断言"]):
+            return "qa_assertions"
+        if any(token in text for token in ["bug", "screenshot", "reproduce", "缺陷", "截图", "复现"]):
+            return "qa_bug_evidence"
+        return "qa_checkpoints"
     if any(token in text for token in ["official", "documentation", "primary", "官方", "一手"]):
         return "primary_sources"
     if any(token in text for token in ["compare", "alternative", "limitation", "对比", "限制"]):
@@ -909,6 +939,20 @@ def _augment_search_plan(items: List[Dict[str, str]], domain: str, goal: str) ->
         "transcript_notes": 1,
         "visual_evidence": 2,
         "comments_discussion": 3,
+        "form_fields": 0,
+        "form_validation": 1,
+        "approval_gate": 2,
+        "booking_inventory": 0,
+        "booking_constraints": 1,
+        "lead_candidates": 0,
+        "lead_fields": 1,
+        "lead_verification": 2,
+        "baseline_state": 0,
+        "alert_conditions": 1,
+        "monitor_follow_up": 2,
+        "qa_checkpoints": 0,
+        "qa_assertions": 1,
+        "qa_bug_evidence": 2,
         "orientation": 0,
         "primary_sources": 1,
         "cross_validation": 2,

@@ -230,6 +230,16 @@ def detect_domain(goal: str, requested_domain: str = "auto") -> str:
     if requested_domain != "auto":
         return requested_domain
     text = goal.lower()
+    if any(token in text for token in ["表单", "报名", "申请", "填写", "问卷", "form", "register", "signup", "apply"]):
+        return "form"
+    if any(token in text for token in ["预订", "预约", "订票", "订位", "酒店", "餐厅", "book", "reserve", "booking"]):
+        return "booking"
+    if any(token in text for token in ["线索", "客户名单", "联系人", "邮箱", "获客", "prospect", "lead", "contact list"]):
+        return "lead"
+    if any(token in text for token in ["监控", "巡检", "价格提醒", "库存提醒", "告警", "monitor", "alert", "watch"]):
+        return "monitoring"
+    if any(token in text for token in ["测试", "回归", "检查按钮", "验收", "qa", "regression", "测试页面"]):
+        return "qa"
     if any(token in text for token in ["github", "repo", "repository", "代码", "开源", "项目"]):
         return "github"
     if any(token in text for token in ["paper", "arxiv", "论文", "scholar", "文献"]):

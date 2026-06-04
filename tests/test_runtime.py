@@ -81,19 +81,18 @@ class RuntimeTests(unittest.TestCase):
         runtime = HarnessRuntime(max_steps=8)
         result = runtime.run(GOALS["booking"], "https://example.com")
         self.assertFalse(result["ok"])
-        self.assertEqual(result["scenario"], "booking_reservation")
-        self.assertEqual(result["steps"][-1]["reason"], "awaiting_user_approval")
-        self.assertEqual(result["approval_requests"][0]["tool"], "reserve")
+        self.assertEqual(result["workflow"]["domain"], "booking")
+        self.assertEqual(result["workflow"]["template"], "booking_workflow")
+        self.assertEqual(result["llm"]["dynamic_agent_loop"]["used"], False)
 
-    def test_runtime_emits_metrics_and_steps_with_auto_approval(self) -> None:
+    def test_runtime_emits_workflow_metadata_with_auto_approval(self) -> None:
         runtime = HarnessRuntime(max_steps=8, auto_approve_sensitive=True)
         result = runtime.run("\u5e2e\u6211\u9884\u7ea6\u4e0a\u6d77\u5468\u672b\u9152\u5e97", "https://example.com")
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["scenario"], "booking_reservation")
-        self.assertEqual(result["metrics"]["task_success"], 1.0)
-        self.assertEqual(len(result["steps"]), 4)
-        self.assertIn("market_comparison", result)
-        self.assertEqual(result["market_comparison"]["leader"], "Browser Copilot Harness")
+        self.assertEqual(result["workflow"]["domain"], "booking")
+        self.assertEqual(result["workflow"]["template"], "booking_workflow")
+        self.assertIn("evidence_checklist", result["llm"]["plan"])
+        self.assertIn("metrics", result)
+        self.assertIn("report", result)
 
     def test_cli_writes_latest_run(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -116,12 +115,12 @@ class RuntimeTests(unittest.TestCase):
             check=True,
         )
 
-        self.assertIn('"scenario": "monitoring_alerts"', completed.stdout)
+        self.assertIn('"domain": "monitoring"', completed.stdout)
         self.assertTrue(latest_run.exists())
 
         payload = json.loads(latest_run.read_text(encoding="utf-8"))
-        self.assertEqual(payload["scenario"], "monitoring_alerts")
-        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["workflow"]["domain"], "monitoring")
+        self.assertEqual(payload["workflow"]["template"], "monitoring_workflow")
 
 
 class DynamicAgentPlannerTests(unittest.TestCase):

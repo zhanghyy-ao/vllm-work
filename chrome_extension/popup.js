@@ -79,6 +79,59 @@ function renderMonitor(monitorMessage, observations = []) {
   return card("浏览器监视", `<p>${escapeHtml(monitorMessage || "已记录监视轨迹")}</p>${rows ? `<ul>${rows}</ul>` : ""}`);
 }
 
+function renderChecklist(result) {
+  const workflowChecklist = result?.llm?.dynamic_agent_loop?.evidence_checklist || result?.llm?.plan?.evidence_checklist || [];
+  const latestNode = Array.isArray(result?.workflow?.nodes) && result.workflow.nodes.length
+    ? result.workflow.nodes[result.workflow.nodes.length - 1]
+    : null;
+  const liveChecklist = latestNode?.inputs?.checklist_status || [];
+  const items = Array.isArray(liveChecklist) && liveChecklist.length ? liveChecklist : workflowChecklist;
+  if (!Array.isArray(items) || !items.length) return "";
+  return card(
+    "任务缺口",
+    `<ul>${items.slice(0, 8).map((item) => {
+      const status = item.status || "unknown";
+      const cls = status === "satisfied" ? "" : status === "partial" ? "warn" : "error";
+      const label = status === "satisfied" ? "已满足" : status === "partial" ? "部分满足" : "待补充";
+      return `<li><span class="pill ${cls}">${escapeHtml(label)}</span> <strong>${escapeHtml(item.stage || item.evidence_stage || item.purpose || "stage")}</strong><p>${escapeHtml(truncate(item.evidence || item.purpose || item.example_query || "", 160))}</p></li>`;
+    }).join("")}</ul>`
+  );
+}
+
+function renderRecentActions(result) {
+  const steps = Array.isArray(result?.steps) ? result.steps : [];
+  if (!steps.length) return "";
+  return card(
+    "最近动作",
+    `<ol>${steps.slice(-5).map((step) => {
+      const detail = step.detail || {};
+      const fields = detail.fields || {};
+      const cls = step.ok ? "" : "error";
+      const target = fields.evidence_stage || step.action || "action";
+      const url = detail.url || "";
+      return `<li><span class="pill ${cls}">${escapeHtml(step.ok ? "成功" : "失败")}</span> ${escapeHtml(step.action || "action")}<br><span class="small">${escapeHtml(target)}</span>${url ? `<br><span class="small">${linkTo(url, truncate(url, 78))}</span>` : ""}</li>`;
+    }).join("")}</ol>`
+  );
+}
+
+function renderWorkflowMeta(result) {
+  const workflow = result?.workflow || {};
+  const template = workflow.template || "dynamic_workflow";
+  const steps = Array.isArray(result?.steps) ? result.steps.length : 0;
+  const nodes = Array.isArray(workflow?.nodes) ? workflow.nodes.length : 0;
+  const mode = result?.llm?.dynamic_agent_loop?.mode || "observe_plan_act_verify";
+  return card(
+    "Agent Loop",
+    `<div class="meta">
+      <span class="pill">${escapeHtml(template)}</span>
+      <span class="pill">mode: ${escapeHtml(mode)}</span>
+      <span class="pill">steps: ${escapeHtml(steps)}</span>
+      <span class="pill">nodes: ${escapeHtml(nodes)}</span>
+    </div>
+    <p>每轮基于当前页面状态、历史动作、证据缺口和截图线索重新规划下一步，而不是按固定脚本执行。</p>`
+  );
+}
+
 function renderAgentResult(result, monitorMessage = "", observations = []) {
   if (!result || typeof result !== "object") {
     return '<p class="empty">运行结果将显示在这里</p>';
@@ -95,6 +148,8 @@ function renderAgentResult(result, monitorMessage = "", observations = []) {
       <span class="pill">证据：${escapeHtml((result.memory?.evidence || []).length)}</span>
     </div>`;
   const summary = card("任务摘要", `${meta}<p>${escapeHtml(report.summary || result.goal || "暂无摘要")}</p>`);
+  const workflowMeta = renderWorkflowMeta(result);
+  const checklist = renderChecklist(result);
   const reasoning = card(
     "可见规划",
     listItems(report.reasoning_outline, (item) => escapeHtml(item), 4) +
@@ -139,11 +194,12 @@ function renderAgentResult(result, monitorMessage = "", observations = []) {
     }, 4)
   );
   const monitor = renderMonitor(monitorMessage, observations);
+  const recentActions = renderRecentActions(result);
   const uncertainties = card("不确定性/下一步", [
     listItems(report.uncertainties, (item) => escapeHtml(item), 3),
     listItems(report.next_actions, (item) => escapeHtml(item), 3),
   ].join(""));
-  return [summary, reasoning, recommendations, matrix, video, multimodal, monitor, uncertainties].filter(Boolean).join("");
+  return [summary, workflowMeta, checklist, reasoning, recentActions, recommendations, matrix, video, multimodal, monitor, uncertainties].filter(Boolean).join("");
 }
 
 function setStatus(text, isError = false) {

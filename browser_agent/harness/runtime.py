@@ -24,9 +24,6 @@ from browser_agent.vision.keyframes import visual_inputs_from_video_digest
 from browser_agent.vision.multimodal import GeminiVisionProvider, build_video_visual_prompt
 
 
-SCENARIO_ONLY_DOMAINS = {"general"}
-
-
 class HarnessRuntime:
     """Harness-first workflow runtime.
 
@@ -52,111 +49,7 @@ class HarnessRuntime:
         self._visual_summary_cache: Dict[str, str] = {}
 
     def run(self, goal: str, start_url: str, domain: str = "auto") -> Dict[str, Any]:
-        if self._should_use_scenario_harness(goal, domain):
-            return self._run_scenario(goal, start_url)
         return self._run_workflow(goal, start_url, domain=domain)
-
-    def _should_use_scenario_harness(self, goal: str, domain: str) -> bool:
-        if domain != "auto":
-            return False
-        scenario = plan_scenario_goal(goal, Observation(url="", title="", text=""))
-        if scenario.scenario in {"booking_reservation", "lead_collection", "monitoring_alerts", "qa_regression", "form_filling"}:
-            return True
-        return detect_domain(goal, "auto") in SCENARIO_ONLY_DOMAINS and scenario.scenario != "research"
-
-    def _run_scenario(self, goal: str, start_url: str) -> Dict[str, Any]:
-        run_id = str(uuid.uuid4())
-        memory = SessionMemory(goal=goal)
-        observation = observe(start_url)
-        plan: Plan = plan_scenario_goal(goal, observation)
-        events: List[Dict[str, Any]] = []
-        step_outputs: List[Dict[str, Any]] = []
-        approval_requests: List[Dict[str, Any]] = []
-
-        for idx, action in enumerate(plan.actions[: self.max_steps], start=1):
-            started = time()
-            if action.sensitive and not self.auto_approve_sensitive:
-                output = {
-                    "ok": False,
-                    "tool": action.tool,
-                    "status": "awaiting_user_approval",
-                    "detail": {
-                        "message": "Sensitive browser action paused pending approval.",
-                        "target": action.target,
-                        "value": action.value,
-                        "page_title": observation.title,
-                    },
-                }
-                verdict = {
-                    "ok": False,
-                    "tool": action.tool,
-                    "reason": "awaiting_user_approval",
-                }
-                approval_requests.append(
-                    {
-                        "step_id": idx,
-                        "tool": action.tool,
-                        "reason": action.reason,
-                        "target": action.target,
-                    }
-                )
-            else:
-                output = execute_action(action, observation)
-                verdict = verify_step(action.tool, output, observation)
-            memory.write(action.tool, output, verdict)
-            event = make_event(
-                run_id=run_id,
-                step_id=idx,
-                phase="execute_verify",
-                tool=action.tool,
-                payload={
-                    "reason": action.reason,
-                    "target": action.target,
-                    "value": action.value,
-                },
-                output={"result": output, "verdict": verdict},
-                url=observation.url,
-                start=started,
-            )
-            events.append(event.to_dict())
-            step_outputs.append(
-                {
-                    "action": action.tool,
-                    "ok": verdict["ok"],
-                    "sensitive": action.sensitive,
-                    "detail": output,
-                    "reason": verdict["reason"],
-                }
-            )
-            if not verdict["ok"]:
-                break
-
-        ok = all(step["ok"] for step in step_outputs) if step_outputs else False
-        evidence = self._build_evidence_summary(observation, plan, step_outputs)
-        result = {
-            "run_id": run_id,
-            "goal": goal,
-            "start_url": start_url,
-            "scenario": plan.scenario,
-            "plan": {
-                "summary": plan.summary,
-                "confidence": plan.confidence,
-                "risk_level": plan.risk_level,
-                "deliverable": plan.deliverable,
-                "success_checks": plan.success_checks,
-                "actions": [a.__dict__ for a in plan.actions],
-            },
-            "steps": step_outputs,
-            "memory": memory.dump(),
-            "events": events,
-            "approval_requests": approval_requests,
-            "evidence": evidence,
-            "ok": ok,
-        }
-        if self.include_market_comparison:
-            result["market_comparison"] = compare_market_profiles(plan.scenario)
-        result["metrics"] = summarize_metrics(result)
-        return result
 
     def _build_evidence_summary(
         self,
