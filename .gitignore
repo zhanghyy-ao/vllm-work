@@ -5,8 +5,16 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+node_modules/
+
+# Local secrets. Commit `.env.example`, not real credentials.
 .env
 .env.*
 !.env.example
+
+# macOS metadata
 .DS_Store
+
+# Generated browser-agent artifacts.
 runs/
+!runs/.gitkeep

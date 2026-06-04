@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import uuid
 from typing import Iterable, List
 
-from browser_agent.types import Observation, Plan, ScenarioDefinition, action_from_spec
+from browser_agent.types import Observation, Plan, ScenarioDefinition, WorkflowSpec, action_from_spec
 
 
 SCENARIOS: List[ScenarioDefinition] = [
@@ -223,8 +224,67 @@ def get_scenario_definition(name: str) -> ScenarioDefinition:
     raise KeyError(f"Unknown scenario: {name}")
 
 
-def plan_goal(goal: str, observation: Observation) -> Plan:
-    """Deterministic ToT-style decomposition with explicit scenario routing."""
+SCENARIO_ONLY_DOMAINS = {"form", "booking", "lead", "monitoring", "qa"}
+
+def detect_domain(goal: str, requested_domain: str = "auto") -> str:
+    if requested_domain != "auto":
+        return requested_domain
+    text = goal.lower()
+    if any(token in text for token in ["表单", "报名", "申请", "填写", "问卷", "form", "register", "signup", "apply"]):
+        return "form"
+    if any(token in text for token in ["预订", "预约", "订票", "订位", "酒店", "餐厅", "book", "reserve", "booking"]):
+        return "booking"
+    if any(token in text for token in ["线索", "客户名单", "联系人", "邮箱", "获客", "prospect", "lead", "contact list"]):
+        return "lead"
+    if any(token in text for token in ["监控", "巡检", "价格提醒", "库存提醒", "告警", "monitor", "alert", "watch"]):
+        return "monitoring"
+    if any(token in text for token in ["测试", "回归", "检查按钮", "验收", "qa", "regression", "测试页面"]):
+        return "qa"
+    if any(token in text for token in ["github", "repo", "repository", "代码", "开源", "项目"]):
+        return "github"
+    if any(token in text for token in ["paper", "arxiv", "论文", "scholar", "文献"]):
+        return "paper"
+    if any(token in text for token in ["购物", "商品", "价格", "键盘", "耳机", "推荐买"]):
+        return "shopping"
+    if any(token in text for token in ["视频", "b站", "bilibili", "youtube", "字幕", "关键帧", "课程", "学习路线", "内容整理"]):
+        return "video"
+    return "general"
+
+
+
+def plan_workflow_goal(goal: str, observation: Observation, domain: str = "auto") -> WorkflowSpec:
+    """Build a workflow shell for the observation-driven agent loop.
+
+    Research workflows intentionally start without fixed action nodes. Evidence
+    stages live in `default_search_plan()` and are used as a checklist by the
+    dynamic agent loop. Executed nodes are appended at runtime.
+    """
+    _ = observation
+    resolved_domain = detect_domain(goal, domain)
+    template = f"{resolved_domain}_research" if resolved_domain in {"github", "paper"} else f"{resolved_domain}_workflow"
+    return WorkflowSpec(
+        workflow_id=str(uuid.uuid4()),
+        template=template,
+        goal=goal.strip(),
+        domain=resolved_domain,
+        summary=f"{resolved_domain} workflow for: {goal.strip()}",
+        nodes=[],
+        confidence=0.78 if resolved_domain in {"github", "paper"} else 0.68,
+        output_schema={
+            "summary": "str",
+            "candidates": "list",
+            "recommendations": "list",
+            "decision_criteria": "list",
+            "comparison_matrix": "list",
+            "video_digest": "dict",
+            "multimodal_notes": "list",
+            "uncertainties": "list",
+            "next_actions": "list",
+        },
+    )
+
+def plan_scenario_goal(goal: str, observation: Observation) -> Plan:
+    """Deterministic scenario routing for harness-safe browser task classes."""
     _ = observation
     text = goal.strip()
 
@@ -233,3 +293,16 @@ def plan_goal(goal: str, observation: Observation) -> Plan:
             return _build_plan(text, scenario)
 
     return _build_plan(text, SCENARIOS[-1])
+
+
+def plan_goal(goal: str, observation: Observation, domain: str | None = None):
+    """Route to either the full browser workflow or the deterministic scenario plan.
+
+    Passing `domain` keeps the newer LLM/browser workflow behavior. Omitting it
+    preserves the scenario-harness API used by the market comparison tests.
+    """
+    if domain is None:
+        return plan_scenario_goal(goal, observation)
+    if detect_domain(goal, domain) in SCENARIO_ONLY_DOMAINS:
+        return plan_scenario_goal(goal, observation)
+    return plan_workflow_goal(goal, observation, domain=domain)
