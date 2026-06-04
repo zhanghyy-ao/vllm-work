@@ -446,7 +446,7 @@ async function monitorAndContinue(tabId, payload, result) {
   return { ok: false, status: "max_monitor_steps_reached", observations, finalUrl: lastObservation?.url || "" };
 }
 
-async function controlBrowser(tabId, payload) {
+async function controlBrowser(tabId, payload, apiBase = API_BASE) {
   await chrome.storage.local.set({
     agentStatus: "running",
     agentError: "",
@@ -458,7 +458,7 @@ async function controlBrowser(tabId, payload) {
 
   await chrome.tabs.update(tabId, { url: normalizeUrl(payload.url) });
 
-  const response = await fetch(`${API_BASE}/api/run`, {
+  const response = await fetch(`${apiBase}/api/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
@@ -497,7 +497,7 @@ if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
       return false;
     }
 
-    controlBrowser(message.tabId, message.payload).catch(async (error) => {
+    controlBrowser(message.tabId, message.payload, message.apiBase || API_BASE).catch(async (error) => {
       await chrome.storage.local.set({
         agentStatus: "error",
         agentError: error.message || String(error)

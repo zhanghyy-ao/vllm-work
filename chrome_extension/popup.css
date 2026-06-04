@@ -71,6 +71,27 @@ h1 {
   font-weight: 800;
 }
 
+.status-stack {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.model-badge {
+  max-width: 160px;
+  border: 1px solid rgba(15, 107, 85, 0.14);
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--moss-deep);
+  font-size: 10px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-badge.running,
 .status-badge.monitoring { background: #fff3d8; color: #8a4b00; }
 .status-badge.done { background: var(--mint); color: var(--moss-deep); }
@@ -97,6 +118,7 @@ label {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   border: 1px solid rgba(15, 107, 85, 0.18);
@@ -110,6 +132,7 @@ textarea {
 
 textarea { resize: vertical; }
 input:focus,
+select:focus,
 textarea:focus { border-color: rgba(15, 107, 85, 0.62); box-shadow: 0 0 0 3px rgba(15, 107, 85, 0.1); }
 
 .quick-grid {
@@ -170,6 +193,16 @@ textarea:focus { border-color: rgba(15, 107, 85, 0.62); box-shadow: 0 0 0 3px rg
   font-size: 12px;
 }
 .status-text.error { color: var(--danger); }
+
+.config-status {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.config-status.ready { color: var(--moss-deep); }
+.config-status.error { color: var(--danger); }
 
 .report-toolbar {
   display: flex;

@@ -143,6 +143,7 @@ def _workflow_search_plan(workflow: WorkflowSpec) -> List[Dict[str, Any]]:
                 "query": node.inputs.get("query"),
                 "purpose": node.inputs.get("llm_purpose") or node.instruction,
                 "source": node.inputs.get("source"),
+                "evidence_stage": node.inputs.get("evidence_stage"),
             }
         )
     return plan[:8]

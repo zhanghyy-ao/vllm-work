@@ -32,6 +32,7 @@ def run_workflow(payload: dict) -> dict:
         vision_provider=payload.get("vision_provider"),
         vision_model=payload.get("vision_model"),
         vision_api_key_env=payload.get("vision_api_key_env"),
+        vision_api_base_url=payload.get("vision_api_base_url"),
     )
 
     runtime = HarnessRuntime(max_steps=max_steps, headless=not headed, agent_config=agent_config)
@@ -43,6 +44,28 @@ def run_workflow(payload: dict) -> dict:
     (out_dir / "latest-report.md").write_text(render_markdown_report(result), encoding="utf-8")
     result["markdown_report_path"] = str(out_dir / "latest-report.md")
     return result
+
+
+def safe_config_payload() -> dict:
+    config = build_agent_config(use_llm=True)
+    return {
+        "ok": True,
+        "provider": config.provider,
+        "model": config.model,
+        "api_base_url": config.api_base_url,
+        "api_key_configured": config.api_key_configured,
+        "vision_provider": config.vision_provider,
+        "vision_model": config.vision_model,
+        "vision_api_base_url": config.vision_api_base_url,
+        "vision_api_key_configured": bool(config.vision_api_key_value),
+        "llm_timeout_sec": config.llm_timeout_sec,
+        "vision_timeout_sec": config.vision_timeout_sec,
+        "planner_max_tokens": config.planner_max_tokens,
+        "report_max_tokens": config.report_max_tokens,
+        "report_retry_max_tokens": config.report_retry_max_tokens,
+        "use_multimodal_planning": config.use_multimodal_planning,
+        "use_visual_precheck": config.use_visual_precheck,
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -63,6 +86,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/api/health":
             self._json(200, {"ok": True, "service": "browser-agent-backend"})
+            return
+        if self.path == "/api/config":
+            self._json(200, safe_config_payload())
             return
         if self.path == "/api/latest":
             fp = Path("runs/latest-run.json")

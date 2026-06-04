@@ -21,7 +21,16 @@ class HarnessEvent:
         return asdict(self)
 
 
-def make_event(run_id: str, step_id: int, phase: str, tool: str, payload: Dict[str, Any], output: Dict[str, Any], url: str, start: float) -> HarnessEvent:
+def make_event(
+    run_id: str,
+    step_id: int,
+    phase: str,
+    tool: str,
+    payload: Dict[str, Any],
+    output: Dict[str, Any],
+    url: str,
+    start: float,
+) -> HarnessEvent:
     return HarnessEvent(
         run_id=run_id,
         step_id=step_id,

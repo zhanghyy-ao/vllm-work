@@ -11,6 +11,11 @@ class Observation:
     text: str
     elements: List[Dict[str, Any]] = field(default_factory=list)
     screenshot_path: str = ""
+    screenshot_base64: str = ""
+    accessibility_tree: List[Dict[str, Any]] = field(default_factory=list)
+    form_fields: List[Dict[str, Any]] = field(default_factory=list)
+    visible_buttons: List[Dict[str, Any]] = field(default_factory=list)
+    visual_summary: str = ""
     extracted_fields: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -23,6 +28,7 @@ class Action:
     reason: str
     target: str = ""
     value: str = ""
+    sensitive: bool = False
 
 
 @dataclass
@@ -30,6 +36,36 @@ class Plan:
     summary: str
     actions: List[Action]
     confidence: float = 0.6
+    scenario: str = "research"
+    risk_level: str = "medium"
+    deliverable: str = "summary"
+    success_checks: List[str] = field(default_factory=list)
+
+
+
+
+@dataclass(frozen=True)
+class ScenarioDefinition:
+    name: str
+    summary: str
+    confidence: float
+    keywords: List[str]
+    action_specs: List[Dict[str, str]]
+    risk_level: str = "medium"
+    deliverable: str = "summary"
+    approval_actions: List[str] = field(default_factory=list)
+    success_checks: List[str] = field(default_factory=list)
+
+
+def action_from_spec(spec: Dict[str, str], approval_actions: List[str] | None = None) -> Action:
+    approval_actions = approval_actions or []
+    return Action(
+        tool=spec["tool"],
+        reason=spec["reason"],
+        target=spec.get("target", ""),
+        value=spec.get("value", ""),
+        sensitive=spec["tool"] in approval_actions,
+    )
 
 
 @dataclass
@@ -106,16 +142,21 @@ class ActionResult:
 
     def to_observation(self, previous: Observation) -> Observation:
         next_elements = list(previous.elements)
+        field_elements = []
         if isinstance(self.fields.get("links"), list):
+            field_elements.extend(self.fields["links"])
+        if isinstance(self.fields.get("interactable_elements"), list):
+            field_elements.extend(self.fields["interactable_elements"])
+        if field_elements:
             seen = {
-                str(item.get("href") or item.get("url") or "")
+                str(item.get("element_id") or item.get("selector") or item.get("href") or item.get("url") or "")
                 for item in next_elements
                 if isinstance(item, dict)
             }
-            for item in self.fields["links"]:
+            for item in field_elements:
                 if not isinstance(item, dict):
                     continue
-                key = str(item.get("href") or item.get("url") or "")
+                key = str(item.get("element_id") or item.get("selector") or item.get("href") or item.get("url") or "")
                 if not key or key in seen:
                     continue
                 seen.add(key)
@@ -126,6 +167,11 @@ class ActionResult:
             text=self.text or previous.text,
             elements=next_elements,
             screenshot_path=str(self.fields.get("screenshot_path", previous.screenshot_path)),
+            screenshot_base64=str(self.fields.get("screenshot_base64", previous.screenshot_base64)),
+            accessibility_tree=self.fields.get("accessibility_tree", previous.accessibility_tree),
+            form_fields=self.fields.get("form_fields", previous.form_fields),
+            visible_buttons=self.fields.get("visible_buttons", previous.visible_buttons),
+            visual_summary=str(self.fields.get("visual_summary", previous.visual_summary)),
             extracted_fields=self.fields,
         )
 

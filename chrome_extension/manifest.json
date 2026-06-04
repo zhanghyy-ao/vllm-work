@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browser Copilot Agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run local Browser Copilot Agent from Chrome popup.",
   "action": {
     "default_title": "Browser Copilot Agent",

@@ -4,8 +4,10 @@ from pathlib import Path
 
 from browser_agent.browser.action import _shopping_link_relevant, _video_link_relevant
 from browser_agent.config import build_agent_config
+from browser_agent.llm.agent import _normalize_search_plan
 from browser_agent.output.report_builder import _reading_to_matrix_row, _scored_comparison_matrix
 from browser_agent.planner.tot import plan_goal
+from browser_agent.strategy.research_patterns import default_search_plan
 from browser_agent.types import Observation
 from browser_agent.vision.keyframes import extract_video_keyframes, visual_inputs_from_video_digest
 from browser_agent.vision.multimodal import GeminiVisionProvider, build_video_visual_prompt
@@ -59,8 +61,86 @@ github_workflow = plan_goal(
     Observation(url='https://github.com', title='', text=''),
     domain='github',
 )
-github_queries = [node.inputs.get('query') for node in github_workflow.nodes if node.action == 'search_web']
-assert_true(github_queries == ['browser automation agent LLM'], 'GitHub browser-agent goals should use an English search query')
+assert_true(github_workflow.nodes == [], 'GitHub workflow shell should not contain fixed action templates')
+github_stages = [item.get('evidence_stage') for item in default_search_plan('github', 'browser automation agent LLM')]
+for expected_stage in ['repo_candidates', 'repo_metadata', 'implementation_docs', 'ecosystem_comparison']:
+    assert_true(expected_stage in github_stages, f'GitHub checklist should include {expected_stage}')
+
+paper_workflow = plan_goal(
+    '调研近期浏览器智能体相关论文和基准',
+    Observation(url='https://arxiv.org', title='', text=''),
+    domain='paper',
+)
+assert_true(paper_workflow.nodes == [], 'paper workflow shell should not contain fixed action templates')
+paper_stages = [item.get('evidence_stage') for item in default_search_plan('paper', 'browser agent benchmark')]
+for expected_stage in ['seed_papers', 'related_work', 'reproducibility', 'limitations']:
+    assert_true(expected_stage in paper_stages, f'paper checklist should include {expected_stage}')
+
+video_workflow = plan_goal(
+    '整理 CLIP 多模态模型入门教程视频',
+    Observation(url='https://www.bing.com', title='', text=''),
+    domain='video',
+)
+assert_true(video_workflow.nodes == [], 'video workflow shell should not contain fixed action templates')
+video_stages = [item.get('evidence_stage') for item in default_search_plan('video', 'CLIP tutorial')]
+for expected_stage in ['video_candidates', 'transcript_notes', 'visual_evidence', 'comments_discussion']:
+    assert_true(expected_stage in video_stages, f'video checklist should include {expected_stage}')
+
+general_workflow = plan_goal(
+    '调研近期浏览器智能体产品',
+    Observation(url='https://www.bing.com', title='', text=''),
+    domain='general',
+)
+assert_true(general_workflow.nodes == [], 'general workflow shell should not contain fixed action templates')
+general_stages = [item.get('evidence_stage') for item in default_search_plan('general', 'browser agent products')]
+for expected_stage in ['orientation', 'primary_sources', 'cross_validation']:
+    assert_true(expected_stage in general_stages, f'general checklist should include {expected_stage}')
+
+shopping_goal = '预算1000元以内，推荐一款适合通勤和办公室使用的降噪耳机'
+shopping_workflow = plan_goal(shopping_goal, Observation(url='https://www.bing.com', title='', text=''), domain='shopping')
+assert_true(shopping_workflow.nodes == [], 'shopping workflow shell should not contain fixed action templates')
+shopping_stages = [item.get('evidence_stage') for item in default_search_plan('shopping', shopping_goal)]
+for expected_stage in ['candidate_pool', 'marketplace_pages', 'comparative_reviews', 'user_comments', 'video_reviews']:
+    assert_true(expected_stage in shopping_stages, f'shopping checklist should include {expected_stage}')
+
+shopping_default_plan = default_search_plan('shopping', shopping_goal)
+default_stages = [item.get('evidence_stage') for item in shopping_default_plan]
+for expected_stage in ['candidate_pool', 'marketplace_pages', 'comparative_reviews', 'user_comments', 'video_reviews']:
+    assert_true(expected_stage in default_stages, f'default shopping plan should include {expected_stage}')
+
+llm_sparse_plan = _normalize_search_plan(
+    {
+        'ok': True,
+        'task_type': 'recommendation',
+        'search_plan': [{'query': '1000元 降噪耳机 推荐', 'purpose': '泛化推荐搜索', 'source': 'shopping'}],
+    },
+    shopping_workflow,
+)
+llm_stages = [item.get('evidence_stage') for item in llm_sparse_plan]
+for expected_stage in ['candidate_pool', 'marketplace_pages', 'comparative_reviews', 'user_comments', 'video_reviews']:
+    assert_true(expected_stage in llm_stages, f'LLM sparse shopping plans should be augmented with {expected_stage}')
+
+github_sparse_plan = _normalize_search_plan(
+    {
+        'ok': True,
+        'task_type': 'research',
+        'search_plan': [{'query': 'browser automation agent LLM', 'purpose': '泛化仓库搜索', 'source': 'github'}],
+    },
+    github_workflow,
+)
+github_llm_stages = [item.get('evidence_stage') for item in github_sparse_plan]
+for expected_stage in ['repo_candidates', 'repo_metadata', 'implementation_docs', 'ecosystem_comparison']:
+    assert_true(expected_stage in github_llm_stages, f'LLM sparse GitHub plans should be augmented with {expected_stage}')
+
+paper_default_plan = default_search_plan('paper', 'browser agent benchmark')
+paper_default_stages = [item.get('evidence_stage') for item in paper_default_plan]
+for expected_stage in ['seed_papers', 'related_work', 'reproducibility', 'limitations']:
+    assert_true(expected_stage in paper_default_stages, f'default paper plan should include {expected_stage}')
+
+video_default_plan = default_search_plan('video', 'CLIP tutorial')
+video_default_stages = [item.get('evidence_stage') for item in video_default_plan]
+for expected_stage in ['video_candidates', 'transcript_notes', 'visual_evidence', 'comments_discussion']:
+    assert_true(expected_stage in video_default_stages, f'default video plan should include {expected_stage}')
 
 with tempfile.TemporaryDirectory() as tmpdir:
     image_path = Path(tmpdir) / 'frame.png'
@@ -71,7 +151,17 @@ with tempfile.TemporaryDirectory() as tmpdir:
         provider = GeminiVisionProvider(config)
         result = provider.analyze_image(str(image_path), build_video_visual_prompt('整理视频', '已知上下文'))
         assert_false(result.get('ok'), 'Gemini should be unavailable without API key')
-        assert_true(result.get('reason') == 'gemini_api_key_missing_or_provider_disabled', 'missing key should be explicit')
+        assert_true(result.get('reason') == 'vision_api_key_missing_or_provider_disabled', 'missing key should be explicit')
+        openai_config = build_agent_config(
+            vision_provider='openai_compatible',
+            vision_model='gpt-4o-mini',
+            vision_api_key_env='OPENAI_API_KEY',
+            vision_api_base_url='https://api.openai.com/v1',
+        )
+        openai_provider = GeminiVisionProvider(openai_config)
+        openai_result = openai_provider.analyze_image(str(image_path), build_video_visual_prompt('整理视频', '已知上下文'))
+        assert_false(openai_result.get('ok'), 'OpenAI-compatible vision should be unavailable without API key')
+        assert_true(openai_result.get('provider') == 'openai_compatible', 'OpenAI-compatible provider should be reported')
     finally:
         if old_key is not None:
             os.environ['GEMINI_API_KEY'] = old_key

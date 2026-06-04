@@ -1,11 +1,229 @@
 from __future__ import annotations
 
-import re
 import uuid
-from typing import List
+from typing import Iterable, List
 
-from browser_agent.strategy.research_patterns import default_decision_criteria
-from browser_agent.types import Observation, WorkflowNode, WorkflowSpec
+from browser_agent.types import Observation, Plan, ScenarioDefinition, WorkflowSpec, action_from_spec
+
+
+SCENARIOS: List[ScenarioDefinition] = [
+    ScenarioDefinition(
+        name="comparison_recommendation",
+        summary="\u63a8\u8350\u4efb\u52a1\u6d41\u7a0b",
+        confidence=0.75,
+        keywords=[
+            "\u6bd4\u8f83",
+            "\u63a8\u8350",
+            "\u54ea\u6b3e",
+            "\u5bf9\u6bd4",
+            "\u9009\u54ea\u4e2a",
+            "compare",
+            "recommend",
+        ],
+        action_specs=[
+            {"tool": "search", "reason": "\u5148\u641c\u96c6\u5019\u9009", "value": "goal"},
+            {"tool": "collect", "reason": "\u6536\u96c6\u5019\u9009\u5361\u7247", "value": "cards"},
+            {"tool": "open_topk", "reason": "\u6253\u5f00\u524d3\u4e2a\u8be6\u60c5\u9875\u91c7\u6837", "value": "3"},
+            {"tool": "compare", "reason": "\u591a\u7ef4\u6bd4\u8f83\u5e76\u63a8\u8350", "value": "goal"},
+        ],
+        risk_level="low",
+        deliverable="comparison_table",
+        success_checks=[
+            "at_least_three_candidates",
+            "clear_recommendation",
+            "evidence_summary_present",
+        ],
+    ),
+    ScenarioDefinition(
+        name="form_filling",
+        summary="\u8868\u5355\u4efb\u52a1\u6d41\u7a0b",
+        confidence=0.72,
+        keywords=[
+            "\u586b",
+            "\u8868\u5355",
+            "\u62a5\u540d",
+            "\u7533\u8bf7",
+            "\u5f55\u5165",
+            "form",
+            "register",
+        ],
+        action_specs=[
+            {"tool": "analyze_form", "reason": "\u8bc6\u522b\u8868\u5355\u5b57\u6bb5"},
+            {"tool": "fill_form", "reason": "\u586b\u5199\u8349\u7a3f"},
+            {"tool": "verify", "reason": "\u6821\u9a8c\u586b\u5199\u72b6\u6001"},
+        ],
+        risk_level="medium",
+        deliverable="draft_form_payload",
+        success_checks=[
+            "required_fields_identified",
+            "draft_values_present",
+            "verification_passed",
+        ],
+    ),
+    ScenarioDefinition(
+        name="booking_reservation",
+        summary="\u9884\u8ba2\u4efb\u52a1\u6d41\u7a0b",
+        confidence=0.78,
+        keywords=[
+            "\u9884\u8ba2",
+            "\u9884\u7ea6",
+            "\u8ba2\u7968",
+            "\u8ba2\u4f4d",
+            "\u8ba2\u9152\u5e97",
+            "\u884c\u7a0b",
+            "book",
+            "reserve",
+        ],
+        action_specs=[
+            {"tool": "search", "reason": "\u641c\u7d22\u53ef\u9884\u8ba2\u8d44\u6e90", "value": "goal"},
+            {"tool": "find_slots", "reason": "\u67e5\u627e\u53ef\u7528\u65f6\u95f4\u6216\u623f\u578b"},
+            {"tool": "apply_filters", "reason": "\u6309\u9884\u7b97\u548c\u504f\u597d\u7b5b\u9009", "value": "goal"},
+            {"tool": "reserve", "reason": "\u751f\u6210\u5f85\u786e\u8ba4\u9884\u8ba2\u8349\u7a3f"},
+        ],
+        risk_level="high",
+        deliverable="reservation_draft",
+        approval_actions=["reserve"],
+        success_checks=[
+            "candidate_inventory_found",
+            "filters_applied",
+            "user_confirmation_before_commit",
+        ],
+    ),
+    ScenarioDefinition(
+        name="lead_collection",
+        summary="\u7ebf\u7d22\u91c7\u96c6\u6d41\u7a0b",
+        confidence=0.74,
+        keywords=[
+            "\u7ebf\u7d22",
+            "\u5ba2\u6237\u540d\u5355",
+            "\u8054\u7cfb\u4eba",
+            "\u90ae\u7bb1",
+            "\u83b7\u5ba2",
+            "\u9500\u552e\u540d\u5355",
+            "lead",
+            "prospect",
+        ],
+        action_specs=[
+            {"tool": "search", "reason": "\u68c0\u7d22\u76ee\u6807\u516c\u53f8\u548c\u8054\u7cfb\u4eba", "value": "goal"},
+            {"tool": "extract_leads", "reason": "\u62bd\u53d6\u7ed3\u6784\u5316\u7ebf\u7d22"},
+            {"tool": "export_csv", "reason": "\u5bfc\u51fa\u4e3a\u53ef\u590d\u7528\u8868\u683c"},
+            {"tool": "verify", "reason": "\u68c0\u67e5\u5b57\u6bb5\u5b8c\u6574\u6027"},
+        ],
+        risk_level="medium",
+        deliverable="lead_sheet",
+        success_checks=[
+            "structured_fields_extracted",
+            "exportable_rows_present",
+            "integrity_check_passed",
+        ],
+    ),
+    ScenarioDefinition(
+        name="monitoring_alerts",
+        summary="\u76d1\u63a7\u4efb\u52a1\u6d41\u7a0b",
+        confidence=0.76,
+        keywords=[
+            "\u76d1\u63a7",
+            "\u5de1\u68c0",
+            "\u4ef7\u683c\u63d0\u9192",
+            "\u5e93\u5b58\u63d0\u9192",
+            "\u544a\u8b66",
+            "\u5173\u6ce8\u53d8\u5316",
+            "monitor",
+            "alert",
+        ],
+        action_specs=[
+            {"tool": "search", "reason": "\u5b9a\u4f4d\u76d1\u63a7\u76ee\u6807\u9875\u9762", "value": "goal"},
+            {"tool": "snapshot_page", "reason": "\u8bb0\u5f55\u5f53\u524d\u57fa\u7ebf"},
+            {"tool": "track_price", "reason": "\u767b\u8bb0\u9700\u8981\u76d1\u63a7\u7684\u5173\u952e\u5b57\u6bb5", "value": "goal"},
+            {"tool": "set_alert", "reason": "\u914d\u7f6e\u63d0\u9192\u89c4\u5219"},
+        ],
+        risk_level="low",
+        deliverable="alert_rule",
+        success_checks=[
+            "baseline_captured",
+            "watch_target_registered",
+            "alert_rule_configured",
+        ],
+    ),
+    ScenarioDefinition(
+        name="qa_regression",
+        summary="\u6d4b\u8bd5\u4efb\u52a1\u6d41\u7a0b",
+        confidence=0.80,
+        keywords=[
+            "\u6d4b\u8bd5",
+            "\u56de\u5f52",
+            "\u68c0\u67e5\u9875\u9762",
+            "\u68c0\u67e5\u6309\u94ae",
+            "\u9a8c\u6536",
+            "\u767b\u5f55\u6d41\u7a0b",
+            "qa",
+            "regression",
+        ],
+        action_specs=[
+            {"tool": "search", "reason": "\u5b9a\u4f4d\u9700\u8981\u9a8c\u8bc1\u7684\u9875\u9762", "value": "goal"},
+            {"tool": "snapshot_page", "reason": "\u8bb0\u5f55\u5f53\u524d\u9875\u9762\u72b6\u6001"},
+            {"tool": "assert_ui", "reason": "\u6821\u9a8c\u5173\u952e\u6309\u94ae\u4e0e\u6d41\u7a0b"},
+            {"tool": "report_bug", "reason": "\u8f93\u51fa\u56de\u5f52\u68c0\u67e5\u62a5\u544a"},
+        ],
+        risk_level="low",
+        deliverable="qa_report",
+        success_checks=[
+            "baseline_snapshot_present",
+            "ui_assertions_passed",
+            "report_ready",
+        ],
+    ),
+    ScenarioDefinition(
+        name="research",
+        summary="\u7814\u7a76\u4efb\u52a1\u6d41\u7a0b",
+        confidence=0.68,
+        keywords=[],
+        action_specs=[
+            {"tool": "search", "reason": "\u68c0\u7d22\u76f8\u5173\u9875\u9762", "value": "goal"},
+            {"tool": "summarize", "reason": "\u603b\u7ed3\u5173\u952e\u4fe1\u606f"},
+        ],
+        risk_level="low",
+        deliverable="research_summary",
+        success_checks=[
+            "relevant_pages_found",
+            "concise_summary_present",
+        ],
+    ),
+]
+
+
+def _matches(goal: str, keywords: Iterable[str]) -> bool:
+    return any(keyword.lower() in goal.lower() for keyword in keywords)
+
+
+def _materialize_value(raw_value: str, goal: str) -> str:
+    return goal if raw_value == "goal" else raw_value
+
+
+def _build_plan(goal: str, scenario: ScenarioDefinition) -> Plan:
+    actions = []
+    for spec in scenario.action_specs:
+        spec_copy = dict(spec)
+        spec_copy["value"] = _materialize_value(spec_copy.get("value", ""), goal)
+        actions.append(action_from_spec(spec_copy, approval_actions=scenario.approval_actions))
+    return Plan(
+        summary=scenario.summary,
+        actions=actions,
+        confidence=scenario.confidence,
+        scenario=scenario.name,
+        risk_level=scenario.risk_level,
+        deliverable=scenario.deliverable,
+        success_checks=list(scenario.success_checks),
+    )
+
+
+def get_scenario_definition(name: str) -> ScenarioDefinition:
+    for scenario in SCENARIOS:
+        if scenario.name == name:
+            return scenario
+    raise KeyError(f"Unknown scenario: {name}")
+
+
 
 
 def detect_domain(goal: str, requested_domain: str = "auto") -> str:
@@ -23,139 +241,15 @@ def detect_domain(goal: str, requested_domain: str = "auto") -> str:
     return "general"
 
 
-def _keywords(goal: str) -> str:
-    cleaned = re.sub(r"[，。！？,.!?]", " ", goal).strip()
-    replacements = {
-        "帮我": " ",
-        "找": " ",
-        "相关": " ",
-        "开源项目": " open source project ",
-        "论文": " paper ",
-        "最近": " recent ",
-        "多模态": " multimodal ",
-        "OOD": " out-of-distribution ",
-        "代码": " code ",
-    }
-    for source, target in replacements.items():
-        cleaned = cleaned.replace(source, target)
-    return " ".join(cleaned.split()) or goal
 
+def plan_workflow_goal(goal: str, observation: Observation, domain: str = "auto") -> WorkflowSpec:
+    """Build a workflow shell for the observation-driven agent loop.
 
-def _shopping_query(goal: str) -> str:
-    if "耳机" in goal:
-        budget = "1000元以内" if "1000" in goal else ""
-        return " ".join(part for part in ["site:post.smzdm.com", budget, "头戴式 降噪耳机 推荐 评测 通勤 办公"] if part).strip()
-    return _keywords(goal)
-
-
-def _shopping_followup_query(goal: str) -> str:
-    if "耳机" in goal:
-        return "WH-CH720N W820NB Space Q45 降噪耳机 对比 评测 缺点"
-    return _shopping_query(goal)
-
-
-def _video_query(goal: str) -> str:
-    if "clip" in goal.lower() or "CLIP" in goal:
-        return "CLIP 多模态 模型 入门 教程 视频 讲解"
-    return _keywords(goal)
-
-
-def _github_query(goal: str) -> str:
-    text = goal.lower()
-    if any(token in text for token in ["浏览器", "browser", "自动化", "agent", "智能体"]):
-        return "browser automation agent LLM"
-    if "多模态" in goal or "multimodal" in text:
-        return "multimodal OOD open source"
-    return _keywords(goal)
-
-
-def _shopping_strategy_inputs(goal: str) -> dict:
-    return {
-        "decision_criteria": default_decision_criteria("shopping", goal),
-        "subquestions": [
-            "预算内有哪些主流品牌和型号值得进入候选池？",
-            "候选耳机分别属于什么类型，是否适合通勤和办公室？",
-            "价格、音质、降噪、舒适度和用户评价分别有什么证据？",
-            "每个候选有哪些差评、短板或购买风险？",
-        ],
-        "reasoning_outline": [
-            "先按预算、品牌型号、类型场景、核心体验和风险点拆解任务。",
-            "第一轮检索收集榜单/评测形成候选池，第二轮检索用具体型号做交叉对比。",
-            "深读候选页面抽取价格、评价和缺点，再生成对比矩阵。",
-        ],
-    }
-
-
-def _node(idx: int, node_type: str, instruction: str, action: str, **inputs) -> WorkflowNode:
-    return WorkflowNode(
-        id=f"n{idx}",
-        type=node_type,
-        instruction=instruction,
-        action=action,
-        inputs=inputs,
-        depends_on=[f"n{idx - 1}"] if idx > 1 else [],
-        success_criteria=["action_ok", "evidence_or_fields"],
-    )
-
-
-def _nodes_for(domain: str, goal: str, start_url: str) -> List[WorkflowNode]:
-    if domain == "shopping":
-        query = _shopping_query(goal)
-    elif domain == "video":
-        query = _video_query(goal)
-    elif domain == "github":
-        query = _github_query(goal)
-    else:
-        query = _keywords(goal)
-    if domain == "github":
-        return [
-            _node(1, "browser_task", "打开 GitHub 作为项目发现入口", "goto", url=start_url or "https://github.com"),
-            _node(2, "browser_task", "搜索相关开源仓库", "search_web", query=query, source="github"),
-            _node(3, "extract", "抽取仓库候选链接与页面文本", "collect_links", source="github"),
-            _node(4, "extract", "打开 Top 候选仓库并深读 README/页面信息", "deep_read_candidates", source="github", limit=3),
-            _node(5, "artifact", "基于证据生成项目推荐摘要", "summarize_text", source="github"),
-        ]
-    if domain == "paper":
-        return [
-            _node(1, "browser_task", "打开论文检索入口", "goto", url=start_url or "https://arxiv.org"),
-            _node(2, "browser_task", "搜索相关论文", "search_web", query=query, source="paper"),
-            _node(3, "extract", "抽取论文候选链接与摘要片段", "collect_links", source="paper"),
-            _node(4, "extract", "打开 Top 候选论文并深读摘要页", "deep_read_candidates", source="paper", limit=3),
-            _node(5, "artifact", "生成论文调研摘要", "summarize_text", source="paper"),
-        ]
-    if domain == "shopping":
-        strategy = _shopping_strategy_inputs(goal)
-        return [
-            _node(1, "browser_task", "打开通用搜索入口", "goto", url=start_url or "https://duckduckgo.com/html/"),
-            _node(2, "browser_task", "搜索商品榜单与评价", "search_web", query=query, source="shopping", **strategy),
-            _node(3, "extract", "抽取商品候选链接", "collect_links", source="shopping", query=query, **strategy),
-            _node(4, "browser_task", "搜索具体型号对比与评测", "search_web", query=_shopping_followup_query(goal), source="shopping", **strategy),
-            _node(5, "extract", "抽取具体型号候选链接", "collect_links", source="shopping", query=_shopping_followup_query(goal), **strategy),
-            _node(6, "extract", "打开 Top 候选商品/评测页面并抽取价格与评价线索", "deep_read_candidates", source="shopping", limit=5, **strategy),
-            _node(7, "artifact", "生成购买建议摘要", "summarize_text", source="shopping", **strategy),
-        ]
-    if domain == "video":
-        return [
-            _node(1, "browser_task", "打开视频搜索入口", "goto", url=start_url or "https://duckduckgo.com/html/"),
-            _node(2, "browser_task", "搜索学习视频", "search_web", query=query, source="video"),
-            _node(3, "extract", "抽取视频候选与描述", "collect_links", source="video"),
-            _node(4, "browser_task", "打开最相关的视频候选页面", "open_candidate", source="video", rank=0),
-            _node(5, "extract", "读取视频页的元数据、简介和可见文本", "extract_video", source="video"),
-            _node(6, "artifact", "生成视频内容整理摘要", "summarize_text", source="video"),
-        ]
-    return [
-        _node(1, "browser_task", "打开起始页面", "goto", url=start_url or "https://example.com"),
-        _node(2, "browser_task", "搜索目标相关资料", "search_web", query=query, source="general"),
-        _node(3, "extract", "抽取页面链接与正文", "collect_links", source="general"),
-        _node(4, "artifact", "生成结构化摘要", "summarize_text", source="general"),
-    ]
-
-
-def plan_goal(goal: str, observation: Observation, domain: str = "auto") -> WorkflowSpec:
-    """Build a deterministic workflow template for the platform MVP.
-
-    This is deterministic by design for stable harness behavior.
+    Research workflows intentionally start without fixed action nodes. Evidence
+    stages live in `default_search_plan()` and are used as a checklist by the
+    dynamic agent loop. Executed nodes are appended at runtime.
     """
+    _ = observation
     resolved_domain = detect_domain(goal, domain)
     template = f"{resolved_domain}_research" if resolved_domain in {"github", "paper"} else f"{resolved_domain}_workflow"
     return WorkflowSpec(
@@ -164,7 +258,7 @@ def plan_goal(goal: str, observation: Observation, domain: str = "auto") -> Work
         goal=goal.strip(),
         domain=resolved_domain,
         summary=f"{resolved_domain} workflow for: {goal.strip()}",
-        nodes=_nodes_for(resolved_domain, goal, observation.url),
+        nodes=[],
         confidence=0.78 if resolved_domain in {"github", "paper"} else 0.68,
         output_schema={
             "summary": "str",
@@ -178,3 +272,25 @@ def plan_goal(goal: str, observation: Observation, domain: str = "auto") -> Work
             "next_actions": "list",
         },
     )
+
+def plan_scenario_goal(goal: str, observation: Observation) -> Plan:
+    """Deterministic scenario routing for harness-safe browser task classes."""
+    _ = observation
+    text = goal.strip()
+
+    for scenario in SCENARIOS:
+        if scenario.keywords and _matches(text, scenario.keywords):
+            return _build_plan(text, scenario)
+
+    return _build_plan(text, SCENARIOS[-1])
+
+
+def plan_goal(goal: str, observation: Observation, domain: str | None = None):
+    """Route to either the full browser workflow or the deterministic scenario plan.
+
+    Passing `domain` keeps the newer LLM/browser workflow behavior. Omitting it
+    preserves the scenario-harness API used by the market comparison tests.
+    """
+    if domain is None:
+        return plan_scenario_goal(goal, observation)
+    return plan_workflow_goal(goal, observation, domain=domain)

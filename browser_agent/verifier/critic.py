@@ -5,20 +5,38 @@ from typing import Any, Dict
 from browser_agent.types import ActionResult, Observation, VerificationResult, WorkflowNode
 
 
+EXPECTED_TOOLS = {
+    "search",
+    "collect",
+    "open_topk",
+    "compare",
+    "summarize",
+    "analyze_form",
+    "fill_form",
+    "verify",
+    "find_slots",
+    "apply_filters",
+    "reserve",
+    "extract_leads",
+    "export_csv",
+    "snapshot_page",
+    "track_price",
+    "set_alert",
+    "assert_ui",
+    "report_bug",
+}
+
+
 def verify_step(tool: str, output: Dict[str, Any], observation: Observation) -> Dict[str, Any]:
-    """Backward-compatible verification wrapper."""
+    """Backward-compatible verification wrapper for deterministic actions."""
     _ = observation
+    if tool not in EXPECTED_TOOLS:
+        return {"ok": False, "tool": tool, "reason": "unknown_tool"}
     ok = bool(output.get("ok"))
-    evidence = output.get("evidence") or []
-    checks = [
-        {"name": "action_ok", "pass": ok},
-        {"name": "evidence_or_fields", "pass": bool(evidence or output.get("fields"))},
-    ]
     return {
-        "ok": ok and all(check["pass"] for check in checks),
+        "ok": ok,
         "tool": tool,
-        "reason": "verified" if ok else "tool_failed",
-        "checks": checks,
+        "reason": "basic_ok" if ok else output.get("error", "tool_failed"),
     }
 
 

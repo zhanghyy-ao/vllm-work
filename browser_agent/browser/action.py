@@ -25,6 +25,48 @@ MAX_TEXT_CHARS = 6000
 MAX_LINKS = 20
 
 
+TOOL_OUTCOMES = {
+    "search": "collected candidate pages",
+    "collect": "captured candidate cards",
+    "open_topk": "opened top ranked detail pages",
+    "compare": "produced comparison table and recommendation",
+    "summarize": "summarized the page evidence",
+    "analyze_form": "identified required form fields",
+    "fill_form": "filled form draft values",
+    "verify": "verified browser state against expected result",
+    "find_slots": "found bookable time slots",
+    "apply_filters": "applied user filters",
+    "reserve": "created reservation draft pending confirmation",
+    "extract_leads": "extracted structured lead records",
+    "export_csv": "exported results to csv-ready rows",
+    "snapshot_page": "captured baseline snapshot",
+    "track_price": "registered watch target and threshold",
+    "set_alert": "configured notification rule",
+    "assert_ui": "validated critical UI checkpoints",
+    "report_bug": "prepared regression report",
+}
+
+
+def execute_action(action: Action, observation: Observation) -> Dict[str, Any]:
+    """Dispatch one browser tool action in deterministic harness-safe mode."""
+    outcome = TOOL_OUTCOMES.get(action.tool)
+    if outcome is None:
+        return {"ok": False, "tool": action.tool, "error": "unsupported_tool"}
+
+    detail = {
+        "message": outcome,
+        "target": action.target,
+        "value": action.value,
+        "page_title": observation.title,
+    }
+    return {
+        "ok": True,
+        "tool": action.tool,
+        "url": observation.url,
+        "detail": detail,
+    }
+
+
 def _search_url(source: str, query: str) -> str:
     encoded = quote_plus(query)
     if source == "github":
@@ -166,6 +208,46 @@ class BrowserSession:
         if self._playwright:
             self._playwright.stop()
 
+    def observe_current_page(
+        self,
+        previous: Observation | None = None,
+        node_id: str = "observe",
+        seed_fields: Dict[str, Any] | None = None,
+    ) -> Observation:
+        assert self.page is not None
+        previous = previous or Observation(url=self.page.url, title="", text="")
+        title = self.page.title()
+        text = self._body_text()
+        snapshot = self._page_snapshot_fields(node_id)
+        links = self._search_result_links()[:20]
+        merged_elements: List[Dict[str, Any]] = []
+        seen = set()
+        for item in list(previous.elements) + list(snapshot.get("interactable_elements", [])) + list(links):
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("element_id") or item.get("selector") or item.get("href") or item.get("url") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged_elements.append(item)
+        merged_fields = dict(previous.extracted_fields)
+        merged_fields.update(snapshot)
+        if seed_fields:
+            merged_fields.update(seed_fields)
+        return Observation(
+            url=self.page.url,
+            title=title or previous.title,
+            text=text or previous.text,
+            elements=merged_elements,
+            screenshot_path=str(snapshot.get("screenshot_path", previous.screenshot_path)),
+            screenshot_base64=str(snapshot.get("screenshot_base64", previous.screenshot_base64)),
+            accessibility_tree=snapshot.get("accessibility_tree", previous.accessibility_tree),
+            form_fields=snapshot.get("form_fields", previous.form_fields),
+            visible_buttons=snapshot.get("visible_buttons", previous.visible_buttons),
+            visual_summary=str(snapshot.get("visual_summary", previous.visual_summary)),
+            extracted_fields=merged_fields,
+        )
+
     def execute(self, node: WorkflowNode, observation: Observation) -> ActionResult:
         try:
             if node.action == "goto":
@@ -186,8 +268,26 @@ class BrowserSession:
                 result = self._collect_links(node, observation)
             elif node.action == "summarize_text":
                 result = self._summarize_text(node, observation)
+            elif node.action == "click_element":
+                result = self._click_element(node, observation)
+            elif node.action == "type_text":
+                result = self._type_text(node, observation)
+            elif node.action == "select_option":
+                result = self._select_option(node, observation)
+            elif node.action == "scroll":
+                result = self._scroll(node, observation)
+            elif node.action == "wait":
+                result = self._wait(node, observation)
+            elif node.action == "back":
+                result = self._back(node, observation)
+            elif node.action == "press_key":
+                result = self._press_key(node, observation)
             else:
                 result = ActionResult(ok=False, action=node.action, url=observation.url, error="unsupported_action")
+            if node.inputs.get("evidence_stage") and isinstance(result.fields, dict):
+                result.fields.setdefault("evidence_stage", node.inputs.get("evidence_stage"))
+            if node.inputs.get("dynamic") and isinstance(result.fields, dict):
+                result.fields.setdefault("dynamic", True)
             result.fallback_used = node.inputs.get("fallback_used")
             return result
         except PlaywrightTimeoutError as exc:
@@ -221,13 +321,15 @@ class BrowserSession:
         text = self._body_text()
         status = response.status if response else None
         ok = bool(title or text) and (status is None or status < 500)
+        fields = {"status": status, "source": node.inputs.get("source", "web")}
+        fields.update(self._page_snapshot_fields(node.id))
         return ActionResult(
             ok=ok,
             action=node.action,
             url=self.page.url,
             title=title,
             text=text,
-            fields={"status": status, "source": node.inputs.get("source", "web")},
+            fields=fields,
             evidence=[_evidence(str(node.inputs.get("source", "web")), self.page.url, claim, title or text)],
             error=None if ok else f"bad_status_or_empty_page: {status}",
         )
@@ -267,13 +369,15 @@ class BrowserSession:
         title = self.page.title()
         text = self._body_text()
         screenshot_path = self._screenshot(node.id)
+        fields = {"screenshot_path": screenshot_path, "source": node.inputs.get("source", "web")}
+        fields.update(self._page_snapshot_fields(node.id, existing_screenshot=screenshot_path))
         return ActionResult(
             ok=bool(text),
             action=node.action,
             url=self.page.url,
             title=title,
             text=text,
-            fields={"screenshot_path": screenshot_path, "source": node.inputs.get("source", "web")},
+            fields=fields,
             evidence=[_evidence(str(node.inputs.get("source", "web")), self.page.url, "Page text extracted", text)],
             error=None if text else "empty_page_text",
         )
@@ -340,13 +444,15 @@ class BrowserSession:
             )
 
         combined = _clean_text(" ".join(str(item.get("text", "")) for item in readings), 3000)
+        fields = {"deep_reads": readings, "links": candidates, "source": source}
+        fields.update(self._page_snapshot_fields(node.id))
         return ActionResult(
             ok=bool(readings),
             action=node.action,
             url=observation.url,
             title=observation.title,
             text=combined or observation.text,
-            fields={"deep_reads": readings, "links": candidates, "source": source},
+            fields=fields,
             evidence=evidence,
             error=None if readings else "deep_read_failed",
         )
@@ -502,13 +608,15 @@ class BrowserSession:
             " ".join(link.get("text", "") for link in links[:8]),
         ]
         support = _clean_text(" ".join(part for part in support_parts if part), 1600)
+        fields = {"video_digest": digest, "source": node.inputs.get("source", "video"), "screenshot_path": screenshot_path}
+        fields.update(self._page_snapshot_fields(node.id, existing_screenshot=screenshot_path))
         return ActionResult(
             ok=bool(support or links or oembed or ytdlp),
             action=node.action,
             url=self.page.url,
             title=title,
             text=support,
-            fields={"video_digest": digest, "source": node.inputs.get("source", "video"), "screenshot_path": screenshot_path},
+            fields=fields,
             evidence=[_evidence(str(node.inputs.get("source", "video")), self.page.url, "Video page digest", support or title, 0.68)],
             error=None if support or links or oembed or ytdlp else "no_video_metadata_extracted",
         )
@@ -517,15 +625,16 @@ class BrowserSession:
         assert self.page is not None
         links = self._search_result_links()
         source = str(node.inputs.get("source", "web"))
-        normalized = self._rank_links(links, source, str(node.inputs.get("query") or ""))
+        query = str(node.inputs.get("query") or self._query_from_url(self.page.url) or self._query_from_url(observation.url) or "")
+        normalized = self._rank_links(links, source, query)
         if source == "shopping" and not normalized:
-            normalized = self._shopping_seed_links(str(node.inputs.get("query") or observation.text or ""))
+            normalized = self._shopping_seed_links(query or str(observation.text or ""))
         if source == "video" and not normalized:
-            normalized = self._video_seed_links(str(node.inputs.get("query") or observation.text or ""))
+            normalized = self._video_seed_links(query or str(observation.text or ""))
         if source == "github":
-            normalized = self._github_api_links(self._query_from_url(self.page.url) or self._query_from_url(observation.url)) or normalized
+            normalized = self._github_api_links(query) or normalized
             if not normalized:
-                normalized = self._github_seed_links(str(node.inputs.get("query") or observation.text or ""))
+                normalized = self._github_seed_links(query or str(observation.text or ""))
         title = self.page.title()
         text = self._body_text()
         evidence = [
@@ -538,13 +647,15 @@ class BrowserSession:
             )
             for item in normalized[:10]
         ]
+        fields = {"links": normalized, "source": source, "query": query}
+        fields.update(self._page_snapshot_fields(node.id))
         return ActionResult(
             ok=bool(normalized),
             action=node.action,
             url=self.page.url,
             title=title,
             text=text,
-            fields={"links": normalized, "source": source},
+            fields=fields,
             evidence=evidence,
             error=None if normalized else "no_links_collected",
         )
@@ -608,6 +719,97 @@ class BrowserSession:
             error=None if summary else "no_text_to_summarize",
         )
 
+    def _click_element(self, node: WorkflowNode, observation: Observation) -> ActionResult:
+        assert self.page is not None
+        locator = self._locator_for_ref(node, observation)
+        if locator is None:
+            return ActionResult(ok=False, action=node.action, url=self.page.url, error="element_ref_not_found")
+        locator.click(timeout=5000)
+        try:
+            self.page.wait_for_load_state("domcontentloaded", timeout=3000)
+        except PlaywrightTimeoutError:
+            pass
+        return self._extract_page(node)
+
+    def _type_text(self, node: WorkflowNode, observation: Observation) -> ActionResult:
+        assert self.page is not None
+        locator = self._locator_for_ref(node, observation)
+        if locator is None:
+            return ActionResult(ok=False, action=node.action, url=self.page.url, error="element_ref_not_found")
+        text = str(node.inputs.get("text") or node.inputs.get("value") or "")
+        if not text:
+            return ActionResult(ok=False, action=node.action, url=self.page.url, error="missing_text")
+        if bool(node.inputs.get("clear", True)):
+            locator.fill("", timeout=5000)
+            locator.fill(text, timeout=5000)
+        else:
+            locator.type(text, timeout=5000)
+        return self._extract_page(node)
+
+    def _select_option(self, node: WorkflowNode, observation: Observation) -> ActionResult:
+        assert self.page is not None
+        locator = self._locator_for_ref(node, observation)
+        if locator is None:
+            return ActionResult(ok=False, action=node.action, url=self.page.url, error="element_ref_not_found")
+        value = str(node.inputs.get("value") or node.inputs.get("label") or "")
+        if not value:
+            return ActionResult(ok=False, action=node.action, url=self.page.url, error="missing_option_value")
+        locator.select_option(value, timeout=5000)
+        return self._extract_page(node)
+
+    def _scroll(self, node: WorkflowNode, observation: Observation) -> ActionResult:
+        assert self.page is not None
+        direction = str(node.inputs.get("direction") or "down").lower()
+        pixels = int(node.inputs.get("pixels") or 700)
+        delta = -abs(pixels) if direction == "up" else abs(pixels)
+        self.page.mouse.wheel(0, delta)
+        return self._extract_page(node)
+
+    def _wait(self, node: WorkflowNode, observation: Observation) -> ActionResult:
+        assert self.page is not None
+        ms = max(250, min(int(node.inputs.get("ms") or 1000), 5000))
+        self.page.wait_for_timeout(ms)
+        return self._extract_page(node)
+
+    def _back(self, node: WorkflowNode, observation: Observation) -> ActionResult:
+        assert self.page is not None
+        self.page.go_back(wait_until="commit", timeout=self.timeout_ms)
+        try:
+            self.page.wait_for_load_state("domcontentloaded", timeout=3000)
+        except PlaywrightTimeoutError:
+            pass
+        return self._extract_page(node)
+
+    def _press_key(self, node: WorkflowNode, observation: Observation) -> ActionResult:
+        assert self.page is not None
+        key = str(node.inputs.get("key") or "")
+        if not key:
+            return ActionResult(ok=False, action=node.action, url=self.page.url, error="missing_key")
+        self.page.keyboard.press(key)
+        return self._extract_page(node)
+
+    def _locator_for_ref(self, node: WorkflowNode, observation: Observation):
+        assert self.page is not None
+        ref = node.inputs.get("element_ref")
+        if ref is None:
+            ref = node.inputs.get("element_id")
+        selector = ""
+        if isinstance(ref, dict):
+            selector = str(ref.get("selector") or "")
+            ref = ref.get("element_id", ref.get("id", ref.get("index")))
+        if not selector and ref is not None:
+            for item in observation.elements or []:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("element_id") or item.get("id") or item.get("index")) == str(ref):
+                    selector = str(item.get("selector") or "")
+                    break
+        if selector:
+            return self.page.locator(selector).first()
+        if ref is not None:
+            return self.page.locator(f'[data-agent-idx="{ref}"]').first()
+        return None
+
     def _body_text(self) -> str:
         assert self.page is not None
         try:
@@ -620,8 +822,92 @@ class BrowserSession:
         out_dir = Path("runs") / "screenshots"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{node_id}-{uuid.uuid4().hex[:8]}.png"
-        self.page.screenshot(path=str(path), full_page=True)
+        self.page.screenshot(path=str(path), full_page=False)
         return str(path)
+
+    def _page_snapshot_fields(self, node_id: str, existing_screenshot: str = "") -> Dict[str, Any]:
+        screenshot_path = existing_screenshot or self._screenshot(node_id)
+        interactable = self._interactable_elements()
+        return {
+            "screenshot_path": screenshot_path,
+            "accessibility_tree": interactable[:30],
+            "interactable_elements": interactable,
+            "form_fields": [item for item in interactable if item.get("role") in {"textbox", "searchbox", "combobox", "checkbox", "radio", "select"}],
+            "visible_buttons": [item for item in interactable if item.get("role") == "button"],
+            "visual_summary": "Screenshot captured for multimodal grounding; use provider analysis when configured.",
+        }
+
+    def _interactable_elements(self) -> List[Dict[str, Any]]:
+        assert self.page is not None
+        script = """() => {
+            const selectors = [
+              'a[href]', 'button', 'input', 'textarea', 'select',
+              '[role=button]', '[role=link]', '[role=textbox]', '[role=searchbox]',
+              '[contenteditable=true]', '[tabindex]:not([tabindex="-1"])'
+            ];
+            const seen = new Set();
+            const roleFor = (el) => {
+              const explicit = el.getAttribute('role');
+              if (explicit) return explicit;
+              const tag = el.tagName.toLowerCase();
+              const type = (el.getAttribute('type') || '').toLowerCase();
+              if (tag === 'a') return 'link';
+              if (tag === 'button' || type === 'button' || type === 'submit') return 'button';
+              if (tag === 'select') return 'select';
+              if (type === 'checkbox') return 'checkbox';
+              if (type === 'radio') return 'radio';
+              if (tag === 'input' && (type === 'search')) return 'searchbox';
+              if (tag === 'input' || tag === 'textarea' || el.isContentEditable) return 'textbox';
+              return tag;
+            };
+            const nameFor = (el) => {
+              const id = el.id;
+              const label = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`)?.innerText : '';
+              return (el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder') || label || el.innerText || el.value || '').replace(/\\s+/g, ' ').trim();
+            };
+            const cssFor = (el, idx) => {
+              el.setAttribute('data-agent-idx', String(idx));
+              return `[data-agent-idx="${idx}"]`;
+            };
+            const picked = [];
+            let idx = 0;
+            for (const el of document.querySelectorAll(selectors.join(','))) {
+              if (seen.has(el)) continue;
+              seen.add(el);
+              const rect = el.getBoundingClientRect();
+              const style = window.getComputedStyle(el);
+              if (!rect || rect.width < 1 || rect.height < 1 || style.visibility === 'hidden' || style.display === 'none') continue;
+              if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) continue;
+              const role = roleFor(el);
+              const name = nameFor(el);
+              const item = {
+                element_id: idx,
+                index: idx,
+                role,
+                tag: el.tagName.toLowerCase(),
+                type: el.getAttribute('type') || '',
+                name,
+                text: name,
+                label: name,
+                href: el.href || '',
+                value: el.value || '',
+                selector: cssFor(el, idx),
+                disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
+                bbox: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}
+              };
+              if (el.tagName.toLowerCase() === 'select') {
+                item.options = Array.from(el.options).slice(0, 20).map(o => ({value: o.value, label: o.label || o.innerText}));
+              }
+              picked.push(item);
+              idx += 1;
+              if (picked.length >= 80) break;
+            }
+            return picked;
+        }"""
+        try:
+            return self.page.evaluate(script)
+        except PlaywrightError:
+            return []
 
     def _page_metadata(self) -> Dict[str, str]:
         assert self.page is not None
@@ -901,13 +1187,20 @@ class BrowserSession:
 
 
 def execute_action(action: Action, observation: Observation) -> Dict[str, Any]:
-    """Backward-compatible stub for callers still using Action objects."""
-    node = WorkflowNode(
-        id="legacy",
-        type="legacy_action",
-        instruction=action.reason,
-        action=action.tool,
-        inputs={"target": action.target, "value": action.value, "url": action.value},
-    )
-    with BrowserSession() as session:
-        return session.execute(node, observation).to_dict()
+    """Dispatch one browser tool action in deterministic harness-safe mode."""
+    outcome = TOOL_OUTCOMES.get(action.tool)
+    if outcome is None:
+        return {"ok": False, "tool": action.tool, "error": "unsupported_tool"}
+
+    detail = {
+        "message": outcome,
+        "target": action.target,
+        "value": action.value,
+        "page_title": observation.title,
+    }
+    return {
+        "ok": True,
+        "tool": action.tool,
+        "url": observation.url,
+        "detail": detail,
+    }

@@ -1,14 +1,27 @@
-const API_BASE = "http://127.0.0.1:8000";
+const DEFAULT_API_BASE = "http://127.0.0.1:8000";
 
 const hasDocument = typeof document !== "undefined";
 const goalEl = hasDocument ? document.getElementById("goal") : null;
 const urlEl = hasDocument ? document.getElementById("url") : null;
+const domainEl = hasDocument ? document.getElementById("domain") : null;
 const maxStepsEl = hasDocument ? document.getElementById("maxSteps") : null;
+const apiBaseEl = hasDocument ? document.getElementById("apiBase") : null;
 const runBtn = hasDocument ? document.getElementById("runBtn") : null;
 const statusEl = hasDocument ? document.getElementById("status") : null;
 const resultEl = hasDocument ? document.getElementById("result") : null;
 const statusBadgeEl = hasDocument ? document.getElementById("statusBadge") : null;
+const modelBadgeEl = hasDocument ? document.getElementById("modelBadge") : null;
+const configStatusEl = hasDocument ? document.getElementById("configStatus") : null;
 const quickChips = hasDocument ? Array.from(document.querySelectorAll(".quick-chip")) : [];
+
+function normalizeApiBase(value) {
+  const raw = String(value || DEFAULT_API_BASE).trim();
+  if (/^https?:\/\//i.test(raw)) {
+    return raw.replace(/\/+$/, "");
+  }
+  const protocol = /^(localhost|127\.0\.0\.1|\[?::1\]?)(:\d+)?(\/|$)/i.test(raw) ? "http" : "https";
+  return `${protocol}://${raw}`.replace(/\/+$/, "");
+}
 
 function normalizeUrl(url) {
   if (!url) return "https://example.com";
@@ -146,9 +159,33 @@ function setStatusBadge(status = "idle") {
   statusBadgeEl.className = `status-badge ${normalized}`;
 }
 
+function setModelBadge(text = "model pending") {
+  if (!modelBadgeEl) return;
+  modelBadgeEl.textContent = text;
+}
+
+function setConfigStatus(text, state = "") {
+  if (!configStatusEl) return;
+  configStatusEl.textContent = text;
+  configStatusEl.className = `config-status ${state}`.trim();
+}
+
+async function fetchBackendConfig(apiBase = getApiBase()) {
+  const response = await fetch(`${apiBase}/api/config`);
+  const data = await response.json();
+  if (!response.ok || !data.ok) {
+    throw new Error(data.error || "无法读取后端配置");
+  }
+  return data;
+}
+
 function setResult(result, monitorMessage = "", observations = []) {
   if (!resultEl) return;
   resultEl.innerHTML = renderAgentResult(result, monitorMessage, observations);
+}
+
+function getApiBase() {
+  return normalizeApiBase(apiBaseEl?.value || DEFAULT_API_BASE);
 }
 
 async function getActiveTab() {
@@ -163,7 +200,9 @@ async function loadDraft() {
   const data = await chrome.storage.local.get([
     "goal",
     "url",
+    "domain",
     "maxSteps",
+    "apiBase",
     "agentStatus",
     "agentError",
     "lastResult",
@@ -173,7 +212,9 @@ async function loadDraft() {
   ]);
   if (data.goal) goalEl.value = data.goal;
   if (data.url) urlEl.value = data.url;
+  if (data.domain && domainEl) domainEl.value = data.domain;
   if (data.maxSteps) maxStepsEl.value = String(data.maxSteps);
+  if (data.apiBase && apiBaseEl) apiBaseEl.value = data.apiBase;
 
   if (data.agentStatus === "running") {
     setStatusBadge("running");
@@ -202,14 +243,35 @@ async function saveDraft() {
   await chrome.storage.local.set({
     goal: goalEl.value,
     url: urlEl.value,
-    maxSteps: Number(maxStepsEl.value || 10)
+    domain: domainEl?.value || "auto",
+    maxSteps: Number(maxStepsEl.value || 10),
+    apiBase: getApiBase()
   });
+}
+
+async function refreshBackendConfig() {
+  try {
+    const config = await fetchBackendConfig();
+    const keyState = config.api_key_configured && config.vision_api_key_configured ? "keys ok" : "missing key";
+    setModelBadge(`${config.model || "model"} / ${config.vision_model || "vision"}`);
+    setConfigStatus(
+      `后端在线：${config.provider || "provider"} ${config.model || ""}，多模态：${config.vision_provider || ""} ${config.vision_model || ""}，${keyState}`,
+      config.api_key_configured ? "ready" : "error"
+    );
+    return config;
+  } catch (error) {
+    setModelBadge("backend offline");
+    setConfigStatus(`后端不可用：${error.message}`, "error");
+    return null;
+  }
 }
 
 async function runAgent() {
   const goal = goalEl.value.trim();
   const url = normalizeUrl(urlEl.value.trim() || "https://example.com");
+  const domain = domainEl?.value || "auto";
   const maxSteps = Number(maxStepsEl.value || 10);
+  const apiBase = getApiBase();
 
   if (!goal) {
     setStatus("请先填写任务目标", true);
@@ -224,22 +286,20 @@ async function runAgent() {
 
   try {
     const tab = await getActiveTab();
+    const backendConfig = await fetchBackendConfig(apiBase);
+    if (!backendConfig.api_key_configured) {
+      throw new Error("后端模型 API key 未配置");
+    }
     await chrome.runtime.sendMessage({
       type: "RUN_AGENT",
       tabId: tab.id,
+      apiBase,
       payload: {
         goal,
-        url,
-        domain: "auto",
+        url: url || tab.url || "https://example.com",
+        domain,
         max_steps: maxSteps,
-        use_llm: true,
-        provider: "deepseek",
-        model: "deepseek-chat",
-        api_key_env: "DEEPSEEK_API_KEY",
-        api_base_url: "https://api.deepseek.com",
-        vision_provider: "gemini",
-        vision_model: "gemini-1.5-flash",
-        vision_api_key_env: "GEMINI_API_KEY"
+        use_llm: true
       }
     });
 
@@ -254,6 +314,12 @@ async function runAgent() {
 
 if (hasDocument) {
   runBtn.addEventListener("click", runAgent);
+  if (apiBaseEl) {
+    apiBaseEl.addEventListener("change", () => {
+      saveDraft();
+      refreshBackendConfig();
+    });
+  }
   quickChips.forEach((chip) => {
     chip.addEventListener("click", () => {
       if (goalEl && chip.dataset.goal) goalEl.value = chip.dataset.goal;
@@ -262,13 +328,26 @@ if (hasDocument) {
       setStatusBadge("idle");
     });
   });
-  document.addEventListener("DOMContentLoaded", loadDraft);
+  document.addEventListener("DOMContentLoaded", async () => {
+    await loadDraft();
+    try {
+      const tab = await getActiveTab();
+      if (urlEl && (!urlEl.value || urlEl.value === "https://example.com") && tab?.url && /^https?:\/\//i.test(tab.url)) {
+        urlEl.value = tab.url;
+      }
+    } catch (_error) {
+      // The popup can still run with a manually supplied URL.
+    }
+    await refreshBackendConfig();
+  });
 }
 
 if (typeof module !== "undefined") {
   module.exports = {
     escapeHtml,
+    fetchBackendConfig,
     linkTo,
+    normalizeApiBase,
     normalizeUrl,
     renderAgentResult,
     renderMonitor,

@@ -14,7 +14,10 @@
         <h1>Browser Copilot</h1>
         <p class="subtitle">搜索、推荐、读视频，并持续观察当前标签页。</p>
       </div>
-      <span id="statusBadge" class="status-badge idle">Idle</span>
+      <div class="status-stack">
+        <span id="statusBadge" class="status-badge idle">Idle</span>
+        <span id="modelBadge" class="model-badge">model pending</span>
+      </div>
     </header>
 
     <section class="composer card-surface">
@@ -33,10 +36,26 @@
           <label for="url">起始 URL</label>
           <input id="url" value="https://example.com" />
         </div>
+        <div class="field-row">
+          <label for="domain">任务场景</label>
+          <select id="domain">
+            <option value="auto">自动识别</option>
+            <option value="shopping">商品推荐</option>
+            <option value="github">GitHub 调研</option>
+            <option value="paper">论文调研</option>
+            <option value="video">视频整理</option>
+            <option value="general">通用调研</option>
+          </select>
+        </div>
         <div class="field-row compact-row">
           <label for="maxSteps">最大步数</label>
           <input id="maxSteps" type="number" min="1" max="30" value="10" />
         </div>
+        <div class="field-row">
+          <label for="apiBase">后端地址</label>
+          <input id="apiBase" value="http://127.0.0.1:8000" />
+        </div>
+        <p id="configStatus" class="config-status">正在读取本地后端配置...</p>
       </details>
 
       <button id="runBtn" class="run-button">运行并控制当前标签页</button>

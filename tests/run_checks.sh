@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/tmp/vllm-work-pycache}"
 python3 -m compileall browser_agent app.py backend_api.py
 node --check chrome_extension/background.js
 node --check chrome_extension/popup.js

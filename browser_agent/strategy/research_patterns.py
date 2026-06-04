@@ -75,9 +75,10 @@ def default_decision_criteria(domain: str, goal: str) -> List[Dict[str, str]]:
 def default_search_plan(domain: str, goal: str) -> List[Dict[str, str]]:
     if domain == "video":
         return [
-            {"query": f"{goal} video tutorial summary", "purpose": "寻找主题相关视频和讲解资料", "source": "video"},
-            {"query": f"{goal} transcript notes key points", "purpose": "寻找字幕、笔记或文字整理", "source": "general"},
-            {"query": f"{goal} demo explanation", "purpose": "寻找演示类内容以便后续视觉识别", "source": "video"},
+            {"query": f"{goal} video tutorial explanation", "purpose": "寻找主题相关视频候选和讲解来源", "source": "video", "evidence_stage": "video_candidates"},
+            {"query": f"{goal} transcript notes key points", "purpose": "寻找字幕、章节、笔记或文字整理", "source": "general", "evidence_stage": "transcript_notes"},
+            {"query": f"{goal} demo slides screen recording", "purpose": "寻找包含演示、屏幕或幻灯片的视觉证据", "source": "video", "evidence_stage": "visual_evidence"},
+            {"query": f"{goal} video comments discussion questions", "purpose": "观察评论区、讨论和常见疑问", "source": "video", "evidence_stage": "comments_discussion"},
         ]
     if domain == "shopping":
         if "耳机" in goal:
@@ -85,23 +86,58 @@ def default_search_plan(domain: str, goal: str) -> List[Dict[str, str]]:
             return [
                 {
                     "query": f"site:post.smzdm.com {budget} 头戴式 降噪耳机 推荐 评测 通勤 办公",
-                    "purpose": "收集预算内主流品牌/型号候选和价格范围",
+                    "purpose": "建立预算内主流品牌/型号候选池和初步价格范围",
                     "source": "shopping",
+                    "evidence_stage": "candidate_pool",
+                },
+                {
+                    "query": f"{budget} 降噪耳机 京东 天猫 官方 商品页 参数 价格 用户评价",
+                    "purpose": "进入商城/商品页线索，核对价格、参数、销量和评价入口",
+                    "source": "shopping",
+                    "evidence_stage": "marketplace_pages",
                 },
                 {
                     "query": "WH-CH720N W820NB Space Q45 降噪耳机 对比 评测 缺点",
                     "purpose": "围绕具体型号比较音质、降噪、舒适度和短板",
                     "source": "shopping",
+                    "evidence_stage": "comparative_reviews",
                 },
                 {
-                    "query": f"{budget} 降噪耳机 用户评价 佩戴舒适度 差评",
-                    "purpose": "收集用户评价、佩戴疲劳和常见问题",
+                    "query": "WH-CH720N W820NB Space Q45 京东 天猫 用户评价 差评 佩戴 舒适度 底噪 夹头",
+                    "purpose": "收集用户评论、差评、佩戴疲劳和常见故障",
                     "source": "general",
+                    "evidence_stage": "user_comments",
+                },
+                {
+                    "query": "WH-CH720N W820NB Space Q45 降噪耳机 测评 视频 B站 YouTube 用户评论",
+                    "purpose": "观察专业视频测评、可见字幕/简介和评论区线索",
+                    "source": "video",
+                    "evidence_stage": "video_reviews",
                 },
             ]
         return [
-            {"query": f"{goal} best comparison review price", "purpose": "收集候选清单和价格范围", "source": "shopping"},
-            {"query": f"{goal} user reviews pros cons", "purpose": "收集用户评价和常见问题", "source": "shopping"},
-            {"query": f"{goal} expert review comparison", "purpose": "收集专业评测对比", "source": "general"},
+            {"query": f"{goal} best comparison review price", "purpose": "建立候选池和价格范围", "source": "shopping", "evidence_stage": "candidate_pool"},
+            {"query": f"{goal} official product page price specs reviews", "purpose": "进入商城/商品页线索，核对参数、价格和评价入口", "source": "shopping", "evidence_stage": "marketplace_pages"},
+            {"query": f"{goal} expert review comparison drawbacks", "purpose": "收集专业评测和横向对比", "source": "general", "evidence_stage": "comparative_reviews"},
+            {"query": f"{goal} user reviews complaints pros cons", "purpose": "收集用户评论、差评和常见问题", "source": "shopping", "evidence_stage": "user_comments"},
+            {"query": f"{goal} video review comments", "purpose": "观察视频测评和评论区线索", "source": "video", "evidence_stage": "video_reviews"},
         ]
-    return [{"query": goal, "purpose": "围绕用户目标收集基础资料", "source": domain if domain != "auto" else "general"}]
+    if domain == "github":
+        return [
+            {"query": f"{goal} GitHub repository", "purpose": "发现候选仓库和同类项目", "source": "github", "evidence_stage": "repo_candidates"},
+            {"query": f"{goal} stars forks license recently updated GitHub", "purpose": "收集活跃度、许可证和维护质量信号", "source": "github", "evidence_stage": "repo_metadata"},
+            {"query": f"{goal} README installation examples documentation", "purpose": "检查 README、安装说明、示例和可运行性", "source": "github", "evidence_stage": "implementation_docs"},
+            {"query": f"{goal} alternatives comparison benchmark", "purpose": "寻找竞品、基准和横向比较线索", "source": "general", "evidence_stage": "ecosystem_comparison"},
+        ]
+    if domain == "paper":
+        return [
+            {"query": f"{goal} arxiv paper", "purpose": "发现种子论文和核心方法", "source": "paper", "evidence_stage": "seed_papers"},
+            {"query": f"{goal} survey benchmark related work", "purpose": "扩展综述、基准和相关工作脉络", "source": "paper", "evidence_stage": "related_work"},
+            {"query": f"{goal} code dataset github", "purpose": "检查代码、数据集和复现资源", "source": "github", "evidence_stage": "reproducibility"},
+            {"query": f"{goal} limitations failure cases evaluation", "purpose": "收集局限性、评测指标和失败案例", "source": "general", "evidence_stage": "limitations"},
+        ]
+    return [
+        {"query": f"{goal} overview", "purpose": "建立任务背景和关键实体", "source": "general", "evidence_stage": "orientation"},
+        {"query": f"{goal} official documentation primary source", "purpose": "寻找官方文档、原始资料或一手来源", "source": "general", "evidence_stage": "primary_sources"},
+        {"query": f"{goal} comparison alternatives limitations", "purpose": "交叉验证替代方案、争议和限制", "source": "general", "evidence_stage": "cross_validation"},
+    ]

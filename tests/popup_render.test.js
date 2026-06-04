@@ -13,7 +13,7 @@ const html = popup.renderAgentResult(
       search_plan: [{ query: 'WH-CH720N W820NB 对比', purpose: '型号对比' }],
       recommendations: [{ name: 'Sony WH-CH720N', url: 'https://www.whathifi.com/reviews/sony-wh-ch720n', score: 53.6, reason: '价格和降噪均衡' }],
       comparison_matrix: [{ name: 'Sony WH-CH720N', url: 'https://www.whathifi.com/reviews/sony-wh-ch720n', score: 53.6, score_reasons: ['review evidence'], price_signal: '1000元以内', snippet: 'review ANC comfort' }],
-      multimodal_notes: [{ provider: 'gemini', status: 'unavailable', reason: 'gemini_api_key_missing_or_provider_disabled' }],
+      multimodal_notes: [{ provider: 'gemini', status: 'unavailable', reason: 'vision_api_key_missing_or_provider_disabled' }],
       uncertainties: ['价格会随平台促销波动'],
       next_actions: ['打开商品页确认实时价格']
     }
@@ -37,9 +37,12 @@ assert(html.includes('页面动作'));
 assert(html.includes('Score 53.6'));
 assert(html.includes('review evidence'));
 assert(html.includes('Sony WH-CH720N'));
-assert(html.includes('gemini_api_key_missing_or_provider_disabled'));
+assert(html.includes('vision_api_key_missing_or_provider_disabled'));
 assert(!html.includes('<script>'));
 assert.equal(popup.normalizeUrl('example.com'), 'https://example.com');
+assert.equal(popup.normalizeApiBase('http://127.0.0.1:8000///'), 'http://127.0.0.1:8000');
+assert.equal(popup.normalizeApiBase('127.0.0.1:8000'), 'http://127.0.0.1:8000');
+assert.equal(popup.normalizeApiBase('api.example.com/v1'), 'https://api.example.com/v1');
 assert.equal(popup.escapeHtml('<img src=x onerror=1>'), '&lt;img src=x onerror=1&gt;');
 assert.equal(popup.scoreBadge({ score: 9 }), '<span class="score">Score 9</span>');
 

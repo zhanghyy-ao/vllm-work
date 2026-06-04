@@ -21,10 +21,21 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="Model name recorded in run metadata")
     parser.add_argument("--api-key-env", default=None, help="Environment variable containing the provider API key")
     parser.add_argument("--api-base-url", default=None, help="Provider API base URL")
-    parser.add_argument("--use-llm", action="store_true", help="Enable configured LLM usage when planner/summarizer support is added")
+    parser.add_argument("--use-llm", action="store_true", help="Enable configured LLM usage")
     parser.add_argument("--vision-provider", default=None, help="Optional multimodal provider, e.g. gemini")
     parser.add_argument("--vision-model", default=None, help="Optional multimodal model name")
     parser.add_argument("--vision-api-key-env", default=None, help="Environment variable containing the multimodal provider API key")
+    parser.add_argument("--vision-api-base-url", default=None, help="OpenAI-compatible multimodal API base URL")
+    parser.add_argument(
+        "--auto-approve-sensitive",
+        action="store_true",
+        help="Allow sensitive deterministic scenario actions such as reservation drafts to execute without pause",
+    )
+    parser.add_argument(
+        "--no-market-compare",
+        action="store_true",
+        help="Skip deterministic scenario market comparison output",
+    )
     args = parser.parse_args()
 
     agent_config = build_agent_config(
@@ -37,8 +48,15 @@ def main() -> None:
         vision_provider=args.vision_provider,
         vision_model=args.vision_model,
         vision_api_key_env=args.vision_api_key_env,
+        vision_api_base_url=args.vision_api_base_url,
     )
-    runtime = HarnessRuntime(max_steps=args.max_steps, headless=not args.headed, agent_config=agent_config)
+    runtime = HarnessRuntime(
+        max_steps=args.max_steps,
+        headless=not args.headed,
+        agent_config=agent_config,
+        auto_approve_sensitive=args.auto_approve_sensitive,
+        include_market_comparison=not args.no_market_compare,
+    )
     result = runtime.run(goal=args.goal, start_url=args.url, domain=args.domain)
 
     out_dir = Path("runs")
