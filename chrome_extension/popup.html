@@ -60,6 +60,12 @@
 
       <button id="runBtn" class="run-button">运行并控制当前标签页</button>
       <p id="status" class="status-text">空闲，等待任务。</p>
+
+      <section class="handoff card-surface">
+        <label for="agentHint">继续指导 Agent</label>
+        <textarea id="agentHint" rows="3" placeholder="例如：现在已经在 GitHub 搜索页，请直接打开第一个仓库候选继续比较 README 和活跃度"></textarea>
+        <button id="continueBtn" class="run-button secondary-button">从当前页面继续</button>
+      </section>
     </section>
 
     <section class="report-toolbar">

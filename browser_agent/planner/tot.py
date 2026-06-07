@@ -256,7 +256,7 @@ def plan_workflow_goal(goal: str, observation: Observation, domain: str = "auto"
     """Build a workflow shell for the observation-driven agent loop.
 
     Research workflows intentionally start without fixed action nodes. Evidence
-    stages live in `default_search_plan()` and are used as a checklist by the
+    stages live in `default_evidence_plan()` and are used as a checklist by the
     dynamic agent loop. Executed nodes are appended at runtime.
     """
     _ = observation

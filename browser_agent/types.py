@@ -22,6 +22,26 @@ class Observation:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class PageFingerprint:
+    url: str
+    element_count: int
+    text_signature: str
+
+    @staticmethod
+    def from_observation(observation: "Observation") -> "PageFingerprint":
+        text = f"{observation.title} {observation.text[:500]} {observation.visual_summary}".strip()
+        compact = " ".join(text.split())[:160]
+        return PageFingerprint(
+            url=observation.url,
+            element_count=len(observation.elements or []),
+            text_signature=compact,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class Action:
     tool: str
@@ -114,6 +134,77 @@ class WorkflowSpec:
 
 
 @dataclass
+class AgentStepContext:
+    goal: str
+    domain: str
+    step_id: int
+    priority_requirement_slot: str
+    current_page: Dict[str, Any]
+    current_page_capabilities: Dict[str, Any]
+    page_fingerprint: PageFingerprint
+    evidence_checklist: List[Dict[str, Any]] = field(default_factory=list)
+    memory: Dict[str, Any] = field(default_factory=dict)
+    completed_steps: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["page_fingerprint"] = self.page_fingerprint.to_dict()
+        return data
+
+
+@dataclass
+class SupervisorState:
+    goal: str
+    domain: str
+    current_url: str
+    current_title: str
+    candidate_count: int
+    recent_actions: List[str] = field(default_factory=list)
+    evidence_count: int = 0
+    evidence_sample: List[Dict[str, Any]] = field(default_factory=list)
+    page_fingerprint: Dict[str, Any] = field(default_factory=dict)
+    page_capabilities: Dict[str, Any] = field(default_factory=dict)
+    priority_requirement_slot: str = ""
+    checklist: List[Dict[str, Any]] = field(default_factory=list)
+    requirement_checklist: List[Dict[str, Any]] = field(default_factory=list)
+    completed_step_count: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class HarnessStepRecord:
+    node_id: str = ""
+    action: str = ""
+    agent: str = ""
+    navigator_agent: str = ""
+    ok: bool = False
+    score: float = 0.0
+    fallback_used: str | None = None
+    failure_type: str = ""
+    supervisor_state: Dict[str, Any] = field(default_factory=dict)
+    detail: Dict[str, Any] = field(default_factory=dict)
+    sensitive: bool = False
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DynamicLoopState:
+    used: bool
+    mode: str
+    fixed_templates_removed: bool
+    evidence_checklist: List[Dict[str, Any]] = field(default_factory=list)
+    requirement_slots: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class EvidenceItem:
     evidence_id: str
     source_type: str
@@ -200,11 +291,14 @@ class StructuredArtifact:
     recommendations: List[Dict[str, Any]] = field(default_factory=list)
     reasoning_outline: List[str] = field(default_factory=list)
     subquestions: List[str] = field(default_factory=list)
+    requirement_progression: List[Dict[str, Any]] = field(default_factory=list)
+    evidence_plan: List[Dict[str, Any]] = field(default_factory=list)
     search_plan: List[Dict[str, Any]] = field(default_factory=list)
     decision_criteria: List[Dict[str, Any]] = field(default_factory=list)
     comparison_matrix: List[Dict[str, Any]] = field(default_factory=list)
     video_digest: Dict[str, Any] = field(default_factory=dict)
     multimodal_notes: List[Dict[str, Any]] = field(default_factory=list)
+    failure_analysis: List[Dict[str, Any]] = field(default_factory=list)
     uncertainties: List[str] = field(default_factory=list)
     next_actions: List[str] = field(default_factory=list)
     citations: List[Dict[str, Any]] = field(default_factory=list)

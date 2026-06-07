@@ -11,6 +11,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from playwright.async_api import async_playwright
 
@@ -23,12 +24,14 @@ CFT_BIN = Path(
     "/Users/zhanghyy-ao/Library/Caches/ms-playwright/chromium-1217/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
 )
 TODAY = datetime.now().strftime("%Y-%m-%d")
-REPORT_PATH = WORKDIR / "docs" / f"chrome-extension-real-control-test-{TODAY}.md"
 SHOT_DIR = WORKDIR / "runs"
 SHOT_DIR.mkdir(parents=True, exist_ok=True)
 API_BASE = "http://127.0.0.1:8000"
 POLL_MS = 2500
 MAX_AGENT_WAIT_SEC = 180
+RUN_STAMP = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+RUN_ID = f"{RUN_STAMP}-{uuid4().hex[:8]}"
+REPORT_PATH = WORKDIR / "docs" / f"chrome-extension-real-control-test-{RUN_ID}.md"
 
 
 def port_open(host: str, port: int) -> bool:
@@ -93,9 +96,9 @@ async def wait_for_url_contains(page, needle: str, timeout_sec: int = 30) -> str
 
 def prepare_extension_dir() -> None:
     if EXT_TMP.exists():
-        shutil.rmtree(EXT_TMP)
+        shutil.rmtree(EXT_TMP, ignore_errors=True)
     if PROFILE_TMP.exists():
-        shutil.rmtree(PROFILE_TMP)
+        shutil.rmtree(PROFILE_TMP, ignore_errors=True)
     shutil.copytree(EXT_SRC, EXT_TMP)
 
 
@@ -146,7 +149,7 @@ def market_comparison_rows() -> list[dict[str, Any]]:
 
 def shot_path(label: str) -> Path:
     safe = label.replace(" ", "-").replace("/", "-").lower()
-    return SHOT_DIR / f"extension-flow-{safe}.png"
+    return SHOT_DIR / f"extension-flow-{RUN_ID}-{safe}.png"
 
 
 async def capture_state(page, label: str, screenshots: list[dict[str, str]]) -> str:
@@ -297,7 +300,7 @@ async def run_visible_flow() -> dict:
                 "goal": "推荐1000元以内适合通勤和办公的降噪耳机，需要比较商城商品页、专业测评、用户评论差评、视频测评评论后给出结论",
                 "url": direct_url,
                 "domain": "shopping",
-                "max_steps": 3,
+                "max_steps": 8,
                 "use_llm": True,
             }
             launch_info = await start_agent(worker, payload)
@@ -305,10 +308,7 @@ async def run_visible_flow() -> dict:
             agent_state = await wait_for_agent_completion(page, worker, screenshots)
             final_shot = await capture_state(page, "04-agent-final-state", screenshots)
 
-            latest_run = {}
-            latest_run_path = WORKDIR / "runs" / "latest-run.json"
-            if latest_run_path.exists():
-                latest_run = json.loads(latest_run_path.read_text(encoding="utf-8"))
+            latest_run = agent_state.get("lastResult") if isinstance(agent_state.get("lastResult"), dict) else {}
             report["agent_control"] = {
                 "launch_info": launch_info,
                 "storage_state": agent_state,

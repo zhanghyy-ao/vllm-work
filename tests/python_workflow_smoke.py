@@ -7,7 +7,7 @@ from browser_agent.config import build_agent_config
 from browser_agent.llm.agent import _normalize_search_plan
 from browser_agent.output.report_builder import _reading_to_matrix_row, _scored_comparison_matrix
 from browser_agent.planner.tot import plan_goal
-from browser_agent.strategy.research_patterns import default_search_plan
+from browser_agent.strategy.research_patterns import default_evidence_plan, default_search_plan, github_search_query, requirement_slots
 from browser_agent.types import Observation
 from browser_agent.vision.keyframes import extract_video_keyframes, visual_inputs_from_video_digest
 from browser_agent.vision.multimodal import GeminiVisionProvider, build_video_visual_prompt
@@ -62,9 +62,24 @@ github_workflow = plan_goal(
     domain='github',
 )
 assert_true(github_workflow.nodes == [], 'GitHub workflow shell should not contain fixed action templates')
+assert_true(
+    github_search_query('帮我找几个可以参考的浏览器自动化智能体 GitHub 开源项目，比较活跃度、语言、README质量和适合借鉴的实现点') == 'browser automation agent 智能体',
+    'GitHub query normalization should keep concise repository intent terms',
+)
+github_slots = [item.get('slot') for item in requirement_slots('github', 'browser automation agent LLM')]
+for expected_slot in ['repo_candidates', 'repo_metadata', 'implementation_docs', 'ecosystem_comparison']:
+    assert_true(expected_slot in github_slots, f'GitHub requirement slots should include {expected_slot}')
 github_stages = [item.get('evidence_stage') for item in default_search_plan('github', 'browser automation agent LLM')]
 for expected_stage in ['repo_candidates', 'repo_metadata', 'implementation_docs', 'ecosystem_comparison']:
     assert_true(expected_stage in github_stages, f'GitHub checklist should include {expected_stage}')
+assert_true(
+    all(item.get('requirement_slot') == item.get('evidence_stage') for item in default_search_plan('github', 'browser automation agent LLM')),
+    'Legacy default_search_plan should now derive from requirement slots',
+)
+assert_true(
+    default_evidence_plan('github', 'browser automation agent LLM') == default_search_plan('github', 'browser automation agent LLM'),
+    'default_evidence_plan should be the primary equivalent of the legacy default_search_plan',
+)
 
 paper_workflow = plan_goal(
     '调研近期浏览器智能体相关论文和基准',
@@ -249,6 +264,7 @@ markdown = render_markdown_report(
         'report': {
             'summary': '这是摘要',
             'reasoning_outline': ['先拆任务'],
+            'requirement_progression': [{'requirement_slot': 'repo_candidates', 'status': 'satisfied', 'latest_action': 'collect_links', 'evidence_summary': 'collected repository candidates'}],
             'search_plan': [{'purpose': '检索仓库', 'source': 'github', 'query': 'browser automation agent LLM'}],
             'recommendations': [{'name': 'browser-use/browser-use', 'url': 'https://github.com/browser-use/browser-use', 'score': 88, 'reason': 'README available'}],
             'comparison_matrix': [{'name': 'browser-use/browser-use', 'url': 'https://github.com/browser-use/browser-use', 'score': 88, 'score_reasons': ['README available'], 'stars': 1000, 'language': 'Python', 'license': 'MIT'}],
@@ -258,5 +274,7 @@ markdown = render_markdown_report(
 )
 assert_true('# 测试推荐报告' in markdown, 'Markdown report should include title')
 assert_true('## Recommendations' in markdown, 'Markdown report should include recommendations')
+assert_true('## Requirement Progression' in markdown, 'Markdown report should include requirement progression')
+assert_true('## Evidence Plan' not in markdown, 'Markdown report should prefer requirement progression over evidence plan when both exist')
 assert_true('browser-use/browser-use' in markdown, 'Markdown report should include recommendation names')
 assert_true('## Comparison Matrix' in markdown, 'Markdown report should include comparison matrix')

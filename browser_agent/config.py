@@ -10,13 +10,13 @@ from typing import Dict, Optional
 class AgentConfig:
     agent_name: str = "browser-workflow-agent"
     provider: str = "openai_compatible"
-    model: str = "gpt-5.5"
+    model: str = "gpt-5.4"
     model_fallbacks: list[str] = field(default_factory=lambda: ["gpt-5.4", "gpt-5.4-mini"])
     api_key_env: str = "BROWSER_AGENT_API_KEY"
     api_base_url: str = "https://synai996.space/v1"
     use_llm: bool = False
     vision_provider: str = "openai_compatible"
-    vision_model: str = "gpt-5.5"
+    vision_model: str = "gpt-5.4"
     vision_model_fallbacks: list[str] = field(default_factory=lambda: ["gpt-5.4", "gpt-5.4-mini"])
     vision_api_key_env: str = "BROWSER_AGENT_API_KEY"
     vision_api_base_url: str = "https://synai996.space/v1"

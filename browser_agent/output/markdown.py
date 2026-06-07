@@ -18,14 +18,17 @@ def render_markdown_report(result: Dict[str, Any]) -> str:
         "",
     ]
     _section(lines, "Summary", [_clean(report.get("summary") or "No summary available.")])
-    _section(lines, "Visible Planning", _list_text(report.get("reasoning_outline")))
+    progression_rendered = _requirement_progression(lines, report.get("requirement_progression"))
+    _section(lines, "Action Rationale", _list_text(report.get("reasoning_outline")))
     _section(lines, "Subquestions", _list_text(report.get("subquestions")))
-    _search_plan(lines, report.get("search_plan"))
+    if not progression_rendered and not report.get("reasoning_outline"):
+        _search_plan(lines, report.get("evidence_plan") or report.get("search_plan"))
     _recommendations(lines, report.get("recommendations"))
     _comparison(lines, report.get("comparison_matrix"), workflow.get("domain"))
     _source_readings(lines, report.get("source_readings"))
     _video_digest(lines, report.get("video_digest"))
     _multimodal(lines, report.get("multimodal_notes"))
+    _failure_analysis(lines, report.get("failure_analysis") or result.get("failure_analysis"))
     _section(lines, "Uncertainties", _list_text(report.get("uncertainties")))
     _section(lines, "Next Actions", _list_text(report.get("next_actions")))
     _citations(lines, report.get("citations"))
@@ -41,18 +44,43 @@ def _section(lines: List[str], title: str, items: List[str]) -> None:
     lines.append("")
 
 
-def _search_plan(lines: List[str], plan: Any) -> None:
+def _search_plan(lines: List[str], plan: Any) -> bool:
     if not isinstance(plan, list) or not plan:
-        return
-    lines.extend(["## Search Plan", ""])
+        return False
+    lines.extend(["## Evidence Plan", ""])
     for item in plan[:8]:
         if not isinstance(item, dict):
             continue
-        purpose = _clean(item.get("purpose") or "Search")
-        query = _clean(item.get("query") or "")
+        purpose = _clean(item.get("purpose") or "Evidence step")
+        hint = _clean(item.get("evidence_hint") or item.get("query") or "")
         source = _clean(item.get("source") or "")
-        lines.append(f"- **{purpose}** (`{source}`): `{query}`")
+        lines.append(f"- **{purpose}** (`{source}`): evidence hint `{hint}`")
     lines.append("")
+    return True
+
+
+def _requirement_progression(lines: List[str], progression: Any) -> bool:
+    if not isinstance(progression, list) or not progression:
+        return False
+    lines.extend(["## Requirement Progression", ""])
+    for item in progression[:8]:
+        if not isinstance(item, dict):
+            continue
+        slot = _clean(item.get("requirement_slot") or item.get("purpose") or "slot")
+        status = _clean(item.get("status") or "missing")
+        evidence = _clean(item.get("evidence_summary") or "")
+        latest_action = _clean(item.get("latest_action") or "")
+        latest_url = _clean(item.get("latest_url") or "")
+        line = f"- **{slot}** `{status}`"
+        if latest_action:
+            line += f" via `{latest_action}`"
+        if latest_url:
+            line += f" - {latest_url}"
+        lines.append(line)
+        if evidence:
+            lines.append(f"  - Current evidence: {evidence}")
+    lines.append("")
+    return True
 
 
 def _recommendations(lines: List[str], recommendations: Any) -> None:
@@ -146,6 +174,27 @@ def _multimodal(lines: List[str], notes: Any) -> None:
         status = _clean(item.get("status") or "")
         reason = _clean(item.get("finding") or item.get("reason") or item.get("purpose") or "")
         lines.append(f"- **{provider}** `{status}`: {reason}")
+    lines.append("")
+
+
+def _failure_analysis(lines: List[str], rows: Any) -> None:
+    if not isinstance(rows, list) or not rows:
+        return
+    lines.extend(["## Failure Analysis", ""])
+    for item in rows[:8]:
+        if not isinstance(item, dict):
+            continue
+        failure_type = _clean(item.get("failure_type") or "unknown_failure")
+        count = _clean(item.get("count") or 0)
+        latest = item.get("latest_example") if isinstance(item.get("latest_example"), dict) else {}
+        action = _clean(latest.get("action") or "")
+        error = _clean(latest.get("error") or "")
+        line = f"- **{failure_type}**: `{count}`"
+        if action:
+            line += f" latest action `{action}`"
+        lines.append(line)
+        if error:
+            lines.append(f"  - Example: {error}")
     lines.append("")
 
 

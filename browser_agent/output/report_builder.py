@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
+from browser_agent.failure_policy import summarize_failure_types
+from browser_agent.strategy.research_patterns import requirement_slots
 from browser_agent.types import EvidenceItem, StructuredArtifact, WorkflowSpec
 
 
@@ -9,23 +12,28 @@ def build_report(workflow: WorkflowSpec, memory_dump: Dict[str, Any], steps: Lis
     evidence = [EvidenceItem(**item) for item in memory_dump.get("evidence", [])]
     candidates = _candidate_rows(evidence)
     source_readings = _source_readings(steps)
+    requirement_progression = _workflow_requirement_progression(workflow, steps)
+    report_status = _report_status(steps, requirement_progression, candidates)
     comparison_matrix = _scored_comparison_matrix(_basic_comparison_matrix(candidates, workflow.domain, source_readings), workflow.domain)
     recommendations = _recommendations(workflow.domain, candidates, comparison_matrix)
-    uncertainties = _uncertainties(steps, candidates)
+    uncertainties = _uncertainties(steps, candidates, requirement_progression, report_status)
     return StructuredArtifact(
-        summary=_summary(workflow, candidates, evidence),
+        summary=_summary(workflow, candidates, evidence, requirement_progression, report_status),
         candidates=candidates,
         source_readings=source_readings,
         recommendations=recommendations,
         reasoning_outline=_workflow_reasoning_outline(workflow),
         subquestions=_workflow_subquestions(workflow),
+        requirement_progression=requirement_progression,
+        evidence_plan=_workflow_evidence_plan(workflow),
         search_plan=_workflow_search_plan(workflow),
         decision_criteria=_workflow_decision_criteria(workflow),
         comparison_matrix=comparison_matrix,
         video_digest=_video_digest(steps),
         multimodal_notes=_multimodal_notes(workflow, steps),
+        failure_analysis=_failure_analysis(steps),
         uncertainties=uncertainties,
-        next_actions=_next_actions(workflow.domain, bool(candidates)),
+        next_actions=_next_actions(workflow.domain, report_status, requirement_progression, bool(candidates)),
         citations=[
             {
                 "source_url": item.source_url,
@@ -48,6 +56,8 @@ def _source_readings(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 continue
             url = item.get("url")
             if not url or url in seen:
+                continue
+            if _low_quality_url(url, " ".join(str(item.get(key, "")) for key in ["title", "description", "text", "name"])):
                 continue
             seen.add(url)
             readings.append(item)
@@ -110,12 +120,12 @@ def _workflow_reasoning_outline(workflow: WorkflowSpec) -> List[str]:
             return [str(item) for item in outline if str(item).strip()][:8]
     if workflow.domain == "shopping":
         return [
-            "先把推荐问题拆成预算、类型/场景、品牌型号、核心体验、风险点五类证据。",
-            "先用榜单/评测搜索建立候选池，再用具体型号对比搜索交叉验证。",
-            "深读候选页面，优先抽取价格、专业评测、用户反馈和缺点。",
-            "最终按证据强弱而不是关键词命中顺序给出推荐。",
+            "先把推荐问题拆成预算、使用场景、候选型号、核心体验和风险点几个需求槽位。",
+            "先观察当前页面是否已有可点击候选、搜索框或筛选控件，再决定是否需要离开当前页。",
+            "进入候选页面后优先抽取价格、专业评测、用户反馈和明显短板，持续补齐缺口。",
+            "最终按当前页面收集到的证据强弱给出推荐，而不是按关键词命中顺序排序。",
         ]
-    return ["先拆解任务目标和证据需求，再用多轮检索与页面深读交叉验证结论。"]
+    return ["先拆解任务目标和证据需求，再根据当前页面状态决定是页内推进、打开候选，还是补一次外部检索。"]
 
 
 def _workflow_subquestions(workflow: WorkflowSpec) -> List[str]:
@@ -134,19 +144,109 @@ def _workflow_subquestions(workflow: WorkflowSpec) -> List[str]:
 
 
 def _workflow_search_plan(workflow: WorkflowSpec) -> List[Dict[str, Any]]:
+    return _workflow_evidence_plan(workflow)
+
+
+def _workflow_evidence_plan(workflow: WorkflowSpec) -> List[Dict[str, Any]]:
     plan: List[Dict[str, Any]] = []
+    slot_index = {str(item.get("slot")): item for item in requirement_slots(workflow.domain, workflow.goal)}
     for node in workflow.nodes:
-        if node.action != "search_web":
+        slot = str(node.inputs.get("requirement_slot") or node.inputs.get("evidence_stage") or "")
+        if node.action != "search_web" and not slot:
             continue
+        slot_meta = slot_index.get(slot, {})
         plan.append(
             {
+                "evidence_hint": node.inputs.get("query"),
                 "query": node.inputs.get("query"),
-                "purpose": node.inputs.get("llm_purpose") or node.instruction,
-                "source": node.inputs.get("source"),
+                "purpose": node.inputs.get("llm_purpose") or slot_meta.get("purpose") or node.instruction,
+                "source": node.inputs.get("source") or slot_meta.get("source"),
                 "evidence_stage": node.inputs.get("evidence_stage"),
+                "requirement_slot": slot,
             }
         )
-    return plan[:8]
+    if plan:
+        return plan[:8]
+    return [
+        {
+            "evidence_hint": "",
+            "query": "",
+            "purpose": item.get("purpose"),
+            "source": item.get("source"),
+            "evidence_stage": item.get("slot"),
+            "requirement_slot": item.get("slot"),
+        }
+        for item in requirement_slots(workflow.domain, workflow.goal)[:8]
+    ]
+
+
+def _workflow_requirement_progression(workflow: WorkflowSpec, steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    slot_index = {
+        str(item.get("slot")): {
+            "requirement_slot": item.get("slot"),
+            "purpose": item.get("purpose"),
+            "source": item.get("source"),
+            "status": "missing",
+            "latest_action": "",
+            "latest_url": "",
+            "evidence_summary": "",
+        }
+        for item in requirement_slots(workflow.domain, workflow.goal)
+        if item.get("slot")
+    }
+    for step in steps:
+        detail = step.get("detail", {}) if isinstance(step, dict) else {}
+        fields = detail.get("fields", {}) if isinstance(detail, dict) else {}
+        slot = str(fields.get("requirement_slot") or fields.get("evidence_stage") or "")
+        if not slot:
+            continue
+        entry = slot_index.setdefault(
+            slot,
+            {
+                "requirement_slot": slot,
+                "purpose": step.get("action") or "unknown",
+                "source": fields.get("source") or "",
+                "status": "missing",
+                "latest_action": "",
+                "latest_url": "",
+                "evidence_summary": "",
+            },
+        )
+        entry["latest_action"] = step.get("action") or entry.get("latest_action") or ""
+        entry["latest_url"] = detail.get("url") or entry.get("latest_url") or ""
+        entry["source"] = fields.get("source") or entry.get("source") or ""
+        entry["status"] = "satisfied" if step.get("ok") else "partial"
+        entry["evidence_summary"] = _slot_evidence_summary(fields, detail)
+    ordered = list(slot_index.values())
+    ordered.sort(key=lambda item: (0 if item.get("status") == "satisfied" else 1 if item.get("status") == "partial" else 2))
+    return ordered[:8]
+
+
+def _slot_evidence_summary(fields: Dict[str, Any], detail: Dict[str, Any]) -> str:
+    for key in [
+        "repo_metadata_signals",
+        "implementation_doc_signals",
+        "review_signals",
+        "comparison_signals",
+        "marketplace_signals",
+        "comment_signals",
+        "transcript_signals",
+        "visual_signals",
+        "candidate_pool_signals",
+        "repo_candidate_signals",
+        "video_candidate_signals",
+        "requirement_slot_signals",
+    ]:
+        payload = fields.get(key)
+        if isinstance(payload, dict) and payload.get("summary"):
+            return str(payload.get("summary"))
+    if isinstance(fields.get("summary"), str) and fields.get("summary"):
+        return str(fields.get("summary"))
+    if isinstance(detail.get("text"), str) and detail.get("text"):
+        return str(detail.get("text"))[:180]
+    if isinstance(fields.get("links"), list) and fields.get("links"):
+        return f"collected {len(fields['links'])} visible candidates"
+    return ""
 
 
 def _basic_comparison_matrix(
@@ -310,15 +410,51 @@ def _parse_star_count(text: str) -> int | None:
         return None
 
 
-def _summary(workflow: WorkflowSpec, candidates: List[Dict[str, Any]], evidence: List[EvidenceItem]) -> str:
-    if candidates:
+def _report_status(
+    steps: List[Dict[str, Any]],
+    requirement_progression: List[Dict[str, Any]],
+    candidates: List[Dict[str, Any]],
+) -> str:
+    if not steps:
+        return "unresolved"
+    if any(not step.get("ok") for step in steps):
+        return "needs_review"
+    if not requirement_progression:
+        return "completed" if candidates else "needs_review"
+    statuses = [str(item.get("status") or "missing") for item in requirement_progression]
+    if statuses and all(status == "satisfied" for status in statuses):
+        return "completed"
+    if any(status in {"satisfied", "partial"} for status in statuses):
+        return "partial"
+    return "needs_review"
+
+
+def _summary(
+    workflow: WorkflowSpec,
+    candidates: List[Dict[str, Any]],
+    evidence: List[EvidenceItem],
+    requirement_progression: List[Dict[str, Any]],
+    report_status: str,
+) -> str:
+    satisfied = sum(1 for item in requirement_progression if item.get("status") == "satisfied")
+    partial = sum(1 for item in requirement_progression if item.get("status") == "partial")
+    total = len(requirement_progression)
+    if report_status == "completed":
         return (
             f"Workflow '{workflow.template}' completed for '{workflow.goal}'. "
-            f"Collected {len(candidates)} candidate links and {len(evidence)} evidence items."
+            f"The agent advanced from the current page state, satisfied {satisfied}/{total or satisfied} requirement slots, "
+            f"collected {len(candidates)} candidate links, and accumulated {len(evidence)} evidence items."
+        )
+    if report_status == "partial":
+        return (
+            f"Workflow '{workflow.template}' made partial progress for '{workflow.goal}', "
+            f"but requirement coverage is still incomplete ({satisfied} satisfied, {partial} partial, {max(total - satisfied - partial, 0)} missing). "
+            f"Collected {len(candidates)} candidate links and {len(evidence)} evidence items so far."
         )
     return (
-        f"Workflow '{workflow.template}' ran for '{workflow.goal}', but candidate extraction was limited. "
-        f"Collected {len(evidence)} evidence items."
+        f"Workflow '{workflow.template}' did not yet reach a reliable result for '{workflow.goal}'. "
+        f"The current page state and collected evidence are still insufficient for completion. "
+        f"Collected {len(candidates)} candidate links and {len(evidence)} evidence items."
     )
 
 
@@ -331,6 +467,8 @@ def _candidate_rows(evidence: List[EvidenceItem]) -> List[Dict[str, Any]]:
         if item.source_url == "about:blank":
             continue
         if not item.source_url or item.source_url in seen:
+            continue
+        if _low_quality_url(item.source_url, item.claim):
             continue
         seen.add(item.source_url)
         rows.append(
@@ -353,7 +491,15 @@ def _recommendations(domain: str, candidates: List[Dict[str, Any]], comparison_m
         "shopping": "Prioritize products with repeated review evidence and clear specs.",
         "video": "Prioritize videos with complete titles, descriptions, and learning sequence fit.",
     }.get(domain, "Prioritize candidates with stronger source evidence.")
-    if comparison_matrix:
+    filtered_matrix = [
+        item for item in comparison_matrix
+        if item.get("url") and not _low_quality_url(str(item.get("url") or ""), " ".join(str(item.get(key, "")) for key in ["name", "title", "description", "snippet", "review_signal"]))
+    ]
+    filtered_candidates = [
+        item for item in candidates
+        if item.get("url") and not _low_quality_url(str(item.get("url") or ""), " ".join(str(item.get(key, "")) for key in ["name", "support"]))
+    ]
+    if filtered_matrix:
         return [
             {
                 "rank": idx + 1,
@@ -362,7 +508,7 @@ def _recommendations(domain: str, candidates: List[Dict[str, Any]], comparison_m
                 "score": item.get("score"),
                 "reason": f"{label} Evidence score {item.get('score')}: {', '.join(item.get('score_reasons', []))}",
             }
-            for idx, item in enumerate(comparison_matrix[:5])
+            for idx, item in enumerate(filtered_matrix[:5])
             if item.get("url")
         ]
     return [
@@ -372,25 +518,111 @@ def _recommendations(domain: str, candidates: List[Dict[str, Any]], comparison_m
             "url": candidate["url"],
             "reason": label,
         }
-        for idx, candidate in enumerate(candidates[:5])
+        for idx, candidate in enumerate(filtered_candidates[:5])
     ]
 
 
-def _uncertainties(steps: List[Dict[str, Any]], candidates: List[Dict[str, Any]]) -> List[str]:
+def _low_quality_url(url: str, text: str = "") -> bool:
+    if not url:
+        return True
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    haystack = f"{url} {text}".lower()
+    blocked_hosts = {
+        "gitcode.csdn.net",
+        "devpress.csdn.net",
+        "blog.csdn.net",
+        "atomgit.com",
+    }
+    if host in blocked_hosts or host.endswith(".csdn.net"):
+        return True
+    blocked_terms = ["开源社区", "代码托管", "仓库镜像", "mirror", "转载", "登录后", "验证码", "403", "forbidden", "access denied", "gitcode", "atomgit", "csdn"]
+    return any(term.lower() in haystack for term in blocked_terms)
+
+
+def _uncertainties(
+    steps: List[Dict[str, Any]],
+    candidates: List[Dict[str, Any]],
+    requirement_progression: List[Dict[str, Any]],
+    report_status: str,
+) -> List[str]:
     uncertainties: List[str] = []
     failed = [step for step in steps if not step.get("ok")]
     if failed:
-        uncertainties.append("Some workflow steps failed or required fallback; inspect events for retry details.")
+        uncertainties.append("Some workflow steps failed or required fallback; inspect the recent page state and retry path before trusting the result.")
+        failure_counts = summarize_failure_types(steps).get("failure_type_counts", {})
+        if failure_counts.get("recognition_failure"):
+            uncertainties.append("Recognition failures occurred: the current page structure was insufficient or ambiguous for stable extraction.")
+        if failure_counts.get("planning_failure"):
+            uncertainties.append("Planning failures occurred: the planner could not consistently map the current page state to a valid next action.")
+        if failure_counts.get("execution_failure"):
+            uncertainties.append("Execution failures occurred: the chosen browser action or the page response failed after planning.")
+    partial_slots = [str(item.get("requirement_slot") or "") for item in requirement_progression if item.get("status") == "partial"]
+    missing_slots = [str(item.get("requirement_slot") or "") for item in requirement_progression if item.get("status") == "missing"]
+    if report_status != "completed" and partial_slots:
+        uncertainties.append(f"Requirement coverage is still partial on: {', '.join(partial_slots[:4])}.")
+    if report_status != "completed" and missing_slots:
+        uncertainties.append(f"Requirement coverage is still missing on: {', '.join(missing_slots[:4])}.")
     if not candidates:
-        uncertainties.append("No candidate links were extracted; the target page may block automation or require login.")
-    return uncertainties or ["This MVP uses rule-based extraction, so ranking quality should be manually reviewed."]
+        uncertainties.append("Candidate extraction is still incomplete; the current page likely needs one more in-page recovery step or a carefully chosen fallback source.")
+    return uncertainties or ["This MVP still mixes rule-based extraction with agent planning, so the final ranking should be manually spot-checked."]
 
 
-def _next_actions(domain: str, has_candidates: bool) -> List[str]:
+def _failure_analysis(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    summary = summarize_failure_types(steps)
+    counts = summary.get("failure_type_counts", {})
+    failed_steps = [step for step in steps if not step.get("ok")]
+    latest_examples = {}
+    for step in failed_steps:
+        failure_type = str(step.get("failure_type") or "")
+        if failure_type and failure_type not in latest_examples:
+            detail = step.get("detail", {}) if isinstance(step.get("detail"), dict) else {}
+            latest_examples[failure_type] = {
+                "action": step.get("action"),
+                "error": detail.get("error") or step.get("reason") or "",
+            }
+    rows: List[Dict[str, Any]] = []
+    for failure_type in ["recognition_failure", "planning_failure", "execution_failure"]:
+        rows.append(
+            {
+                "failure_type": failure_type,
+                "count": counts.get(failure_type, 0),
+                "latest_example": latest_examples.get(failure_type, {}),
+            }
+        )
+    return rows
+
+
+def _next_actions(
+    domain: str,
+    report_status: str,
+    requirement_progression: List[Dict[str, Any]],
+    has_candidates: bool,
+) -> List[str]:
+    if report_status == "completed":
+        return []
+    partial_slots = [str(item.get("requirement_slot") or "") for item in requirement_progression if item.get("status") == "partial"]
+    missing_slots = [str(item.get("requirement_slot") or "") for item in requirement_progression if item.get("status") == "missing"]
+    if partial_slots:
+        return [
+            f"Continue from the current page and strengthen evidence for: {', '.join(partial_slots[:3])}.",
+            "Prefer current-page interactables and deeper page reads before issuing a new external query.",
+        ]
+    if missing_slots and has_candidates:
+        return [
+            f"Collect the remaining requirement slots: {', '.join(missing_slots[:3])}.",
+            "Keep the harness page-first: open visible candidates and extract missing evidence before broadening search.",
+        ]
     if not has_candidates:
-        return ["Try a narrower query or switch to a source-specific URL."]
+        if domain == "github":
+            return ["Prefer opening repository candidates already visible on the current page; only then fall back to GitHub metadata retrieval."]
+        if domain == "paper":
+            return ["Prefer opening paper candidates already visible on the current page, then fall back to arXiv retrieval only if the page offers no stable path."]
+        if domain == "video":
+            return ["Prefer opening a visible video candidate from the current page, then extract transcript, description, and screenshot evidence."]
+        return ["Continue with in-page search-box recovery, candidate extraction, and only then a source-specific fallback before asking for human review."]
     if domain == "github":
-        return ["Open the top repositories, inspect README/code entrypoints, then verify recent activity."]
+        return ["Open the top visible repositories, inspect README/code entrypoints, then verify recent activity."]
     if domain == "paper":
-        return ["Open top papers, extract method/dataset/metric fields, then cross-check code availability."]
-    return ["Review the top candidates and run a deeper extraction workflow on the best matches."]
+        return ["Open the most relevant visible papers, extract method/dataset/metric fields, then cross-check code availability."]
+    return ["Review the top visible candidates and run a deeper extraction workflow on the best matches."]

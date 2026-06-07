@@ -23,6 +23,19 @@ from browser_agent.vision.keyframes import extract_video_keyframes
 
 MAX_TEXT_CHARS = 6000
 MAX_LINKS = 20
+SLOT_SIGNAL_FIELD_MAP = {
+    "candidate_pool": "candidate_pool_signals",
+    "repo_candidates": "repo_candidate_signals",
+    "video_candidates": "video_candidate_signals",
+    "repo_metadata": "repo_metadata_signals",
+    "implementation_docs": "implementation_doc_signals",
+    "comparative_reviews": "review_signals",
+    "ecosystem_comparison": "comparison_signals",
+    "marketplace_pages": "marketplace_signals",
+    "user_comments": "comment_signals",
+    "transcript_notes": "transcript_signals",
+    "visual_evidence": "visual_signals",
+}
 
 
 TOOL_OUTCOMES = {
@@ -185,6 +198,104 @@ def _video_link_relevant(text: str, href: str, query: str) -> bool:
     return any(term in haystack for term in query_terms)
 
 
+def _candidate_matches_requirement_slot(text: str, href: str, requirement_slot: str, query: str) -> bool:
+    haystack = f"{text} {href}".lower()
+    if requirement_slot == "comparative_reviews":
+        review_domains = ["rtings.com", "soundguys.com", "whathifi.com", "techradar.com", "tomsguide.com", "theverge.com", "smzdm.com", "zol.com.cn"]
+        if any(domain in haystack for domain in review_domains):
+            return True
+        review_terms = ["评测", "review", "reviews", "对比", "compare", "comparison", "pros", "cons", "优点", "缺点", "续航", "降噪"]
+        return any(term in haystack for term in review_terms)
+    if requirement_slot == "marketplace_pages":
+        market_terms = ["商品", "参数", "价格", "price", "spec", "official", "jd.com", "tmall.com", "taobao.com", "amazon.com", "bestbuy.com", "soundcore.com", "sony.com", "edifier.com"]
+        return any(term in haystack for term in market_terms)
+    if requirement_slot == "user_comments":
+        comment_terms = ["评论", "差评", "comment", "comments", "complaint", "issue", "problem", "reddit", "forum", "bbs", "评价"]
+        return any(term in haystack for term in comment_terms)
+    if requirement_slot in {"video_reviews", "transcript_notes"}:
+        return _video_link_relevant(text, href, query) or any(term in haystack for term in ["youtube", "bilibili", "视频", "watch"])
+    return True
+
+
+def _candidate_quality_score(text: str, href: str, source: str, query: str, requirement_slot: str = "") -> int:
+    haystack = f"{text} {href}".lower()
+    parsed = urlparse(href)
+    host = parsed.netloc.lower()
+    score = 0
+
+    blocked_domains = [
+        "gitcode.csdn.net",
+        "devpress.csdn.net",
+        "csdn.net",
+        "blog.csdn.net",
+        "atomgit.com",
+    ]
+    if any(domain in host for domain in blocked_domains):
+        score -= 8
+    if any(token in haystack for token in ["mirror", "转载", "镜像", "登录后", "验证码", "forbidden", "403"]):
+        score -= 6
+    if any(token in haystack for token in ["open source community", "开源社区", "代码托管", "仓库镜像", "atomgit", "gitcode"]):
+        score -= 10
+
+    if source == "shopping":
+        if any(domain in host for domain in ["rtings.com", "soundguys.com", "whathifi.com", "theverge.com", "techradar.com", "tomsguide.com"]):
+            score += 10
+        if any(domain in host for domain in ["smzdm.com", "zol.com.cn", "jd.com", "tmall.com", "taobao.com", "amazon.com", "bestbuy.com", "soundcore.com", "sony.com", "edifier.com"]):
+            score += 7
+        if any(domain in host for domain in ["youtube.com", "youtu.be", "bilibili.com"]):
+            score += 5
+        if any(token in haystack for token in ["评测", "review", "reviews", "对比", "compare", "comparison", "pros", "cons", "优点", "缺点"]):
+            score += 5
+        if any(token in haystack for token in ["价格", "price", "spec", "参数", "续航", "降噪", "通勤", "办公", "comment", "评论", "差评"]):
+            score += 3
+        if any(token in haystack for token in ["community", "forum", "bbs", "百科", "wiki", "github"]):
+            score -= 2
+        if query and _shopping_link_relevant(text, href, query):
+            score += 2
+    elif source == "video":
+        if any(domain in host for domain in ["youtube.com", "youtu.be", "bilibili.com", "vimeo.com"]):
+            score += 8
+        if _video_link_relevant(text, href, query):
+            score += 4
+    elif source == "github":
+        if host == "github.com":
+            score += 10
+    else:
+        if any(token in haystack for token in ["review", "评测", "compare", "comparison", "recommend", "推荐"]):
+            score += 4
+        if any(domain in host for domain in ["rtings.com", "soundguys.com", "whathifi.com", "smzdm.com", "zol.com.cn"]):
+            score += 5
+
+    if requirement_slot == "comparative_reviews":
+        if any(domain in host for domain in ["rtings.com", "soundguys.com", "whathifi.com", "techradar.com", "tomsguide.com", "theverge.com"]):
+            score += 10
+        if any(token in haystack for token in ["评测", "review", "reviews", "对比", "compare", "comparison", "pros", "cons", "优点", "缺点"]):
+            score += 6
+        if any(domain in host for domain in ["jd.com", "tmall.com", "taobao.com", "amazon.com", "bestbuy.com"]):
+            score += 1
+    elif requirement_slot == "marketplace_pages":
+        if any(domain in host for domain in ["jd.com", "tmall.com", "taobao.com", "amazon.com", "bestbuy.com", "soundcore.com", "sony.com", "edifier.com"]):
+            score += 10
+        if any(token in haystack for token in ["价格", "price", "spec", "参数", "购买", "商品"]):
+            score += 5
+    elif requirement_slot == "user_comments":
+        if any(token in haystack for token in ["评论", "差评", "comment", "comments", "complaint", "issue", "problem", "reddit", "forum", "bbs"]):
+            score += 8
+    elif requirement_slot in {"video_reviews", "transcript_notes"}:
+        if any(domain in host for domain in ["youtube.com", "youtu.be", "bilibili.com"]):
+            score += 10
+
+    return score
+
+
+def _requirement_slot_from_node(node: WorkflowNode) -> str:
+    return str(node.inputs.get("requirement_slot") or node.inputs.get("evidence_stage") or "")
+
+
+def _slot_signal_field(requirement_slot: str) -> str:
+    return SLOT_SIGNAL_FIELD_MAP.get(requirement_slot, "requirement_slot_signals")
+
+
 class BrowserSession:
     """Small Playwright wrapper used by the harness runtime."""
 
@@ -248,14 +359,26 @@ class BrowserSession:
             extracted_fields=merged_fields,
         )
 
+    def sync_to_observation(self, observation: Observation) -> None:
+        assert self.page is not None
+        target_url = str(observation.url or "").strip()
+        if not target_url or target_url == "about:blank":
+            return
+        current_url = str(self.page.url or "").strip()
+        if current_url == target_url:
+            return
+        self.page.goto(target_url, wait_until="commit", timeout=self.timeout_ms)
+        try:
+            self.page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except PlaywrightTimeoutError:
+            pass
+
     def execute(self, node: WorkflowNode, observation: Observation) -> ActionResult:
         try:
             if node.action == "goto":
                 result = self._goto(str(node.inputs.get("url") or observation.url), node)
             elif node.action == "search_web":
-                source = str(node.inputs.get("source", "general"))
-                query = str(node.inputs.get("query") or node.inputs.get("value") or "")
-                result = self._goto(_search_url(source, query), node, claim=f"Search results for {query}")
+                result = self._search_web(node, observation)
             elif node.action == "open_candidate":
                 result = self._open_candidate(node, observation)
             elif node.action == "deep_read_candidates":
@@ -364,6 +487,37 @@ class BrowserSession:
             return _search_url(source, query)
         return str(node.inputs.get("url") or observation.url)
 
+    def _search_web(self, node: WorkflowNode, observation: Observation) -> ActionResult:
+        source = str(node.inputs.get("source", "general"))
+        query = str(node.inputs.get("query") or node.inputs.get("value") or "")
+        search_box_ref = self._find_searchbox_ref(observation)
+        if search_box_ref is not None:
+            type_node = WorkflowNode(
+                id=node.id,
+                type=node.type,
+                instruction=node.instruction,
+                action="type_text",
+                inputs={
+                    **node.inputs,
+                    "element_ref": search_box_ref,
+                    "text": query,
+                    "clear": True,
+                    "submit_after_type": True,
+                    "search_execution_mode": "in_page_searchbox",
+                },
+                depends_on=node.depends_on,
+                success_criteria=node.success_criteria,
+                retry_policy=node.retry_policy,
+            )
+            result = self._type_text(type_node, observation)
+            if isinstance(result.fields, dict):
+                result.fields.setdefault("search_execution_mode", "in_page_searchbox")
+            return result
+        result = self._goto(_search_url(source, query), node, claim=f"Search results for {query}")
+        if isinstance(result.fields, dict):
+            result.fields.setdefault("search_execution_mode", "external_search_url")
+        return result
+
     def _extract_page(self, node: WorkflowNode) -> ActionResult:
         assert self.page is not None
         title = self.page.title()
@@ -371,6 +525,8 @@ class BrowserSession:
         screenshot_path = self._screenshot(node.id)
         fields = {"screenshot_path": screenshot_path, "source": node.inputs.get("source", "web")}
         fields.update(self._page_snapshot_fields(node.id, existing_screenshot=screenshot_path))
+        requirement_slot = _requirement_slot_from_node(node)
+        self._attach_slot_signals(fields, requirement_slot, {"title": title, "text": text, "screenshot_path": screenshot_path})
         return ActionResult(
             ok=bool(text),
             action=node.action,
@@ -383,7 +539,10 @@ class BrowserSession:
         )
 
     def _open_candidate(self, node: WorkflowNode, observation: Observation) -> ActionResult:
-        candidates = observation.elements or []
+        source = str(node.inputs.get("source", "web"))
+        requirement_slot = _requirement_slot_from_node(node)
+        query = str(node.inputs.get("query") or self._query_from_url(observation.url) or "")
+        candidates = self._prioritized_candidates(observation.elements or [], source, query, requirement_slot)
         rank = int(node.inputs.get("rank", 0))
         if not candidates or rank >= len(candidates):
             return ActionResult(
@@ -401,9 +560,11 @@ class BrowserSession:
         return self._goto(href, node, claim=f"Opened candidate: {candidate.get('text', href)}")
 
     def _deep_read_candidates(self, node: WorkflowNode, observation: Observation) -> ActionResult:
-        candidates = observation.elements or []
-        limit = max(1, min(int(node.inputs.get("limit", 3)), 5))
         source = str(node.inputs.get("source", "web"))
+        requirement_slot = _requirement_slot_from_node(node)
+        query = str(node.inputs.get("query") or self._query_from_url(observation.url) or "")
+        candidates = self._prioritized_candidates(observation.elements or [], source, query, requirement_slot)
+        limit = max(1, min(int(node.inputs.get("limit", 3)), 5))
         readings: List[Dict[str, Any]] = []
         evidence: List[EvidenceItem] = []
 
@@ -446,6 +607,16 @@ class BrowserSession:
         combined = _clean_text(" ".join(str(item.get("text", "")) for item in readings), 3000)
         fields = {"deep_reads": readings, "links": candidates, "source": source}
         fields.update(self._page_snapshot_fields(node.id))
+        self._attach_slot_signals(
+            fields,
+            requirement_slot,
+            {
+                "readings": readings,
+                "links": candidates,
+                "combined_text": combined,
+                "page_title": observation.title,
+            },
+        )
         return ActionResult(
             ok=bool(readings),
             action=node.action,
@@ -456,6 +627,27 @@ class BrowserSession:
             evidence=evidence,
             error=None if readings else "deep_read_failed",
         )
+
+    def _prioritized_candidates(self, candidates: List[Dict[str, Any]], source: str, query: str = "", requirement_slot: str = "") -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        seen = set()
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            href = str(candidate.get("href") or candidate.get("url") or "")
+            text = _clean_text(str(candidate.get("text") or candidate.get("name") or candidate.get("label") or ""), 160)
+            if not href or href in seen:
+                continue
+            if source == "shopping" and not _shopping_link_relevant(text, href, query):
+                continue
+            if source == "video" and not _video_link_relevant(text, href, query):
+                continue
+            if requirement_slot and not _candidate_matches_requirement_slot(text, href, requirement_slot, query):
+                continue
+            seen.add(href)
+            normalized.append({**candidate, "href": href, "text": text, "_score": _candidate_quality_score(text, href, source, query, requirement_slot)})
+        normalized.sort(key=lambda item: (int(item.get("_score", 0)), len(str(item.get("text") or ""))), reverse=True)
+        return normalized
 
     def _read_candidate_page(self, href: str, candidate: Dict[str, Any], rank: int, source: str) -> Dict[str, Any]:
         if source == "github":
@@ -580,6 +772,7 @@ class BrowserSession:
         assert self.page is not None
         title = self.page.title()
         text = self._body_text()
+        requirement_slot = _requirement_slot_from_node(node)
         meta = self._page_metadata()
         links = self._visible_video_links()
         transcript = self._visible_transcript_text()
@@ -610,6 +803,11 @@ class BrowserSession:
         support = _clean_text(" ".join(part for part in support_parts if part), 1600)
         fields = {"video_digest": digest, "source": node.inputs.get("source", "video"), "screenshot_path": screenshot_path}
         fields.update(self._page_snapshot_fields(node.id, existing_screenshot=screenshot_path))
+        self._attach_slot_signals(
+            fields,
+            requirement_slot,
+            {"digest": digest, "links": links, "transcript": transcript, "support": support},
+        )
         return ActionResult(
             ok=bool(support or links or oembed or ytdlp),
             action=node.action,
@@ -624,17 +822,15 @@ class BrowserSession:
     def _collect_links(self, node: WorkflowNode, observation: Observation) -> ActionResult:
         assert self.page is not None
         links = self._search_result_links()
+        if not links:
+            links = self._observation_links(observation)
         source = str(node.inputs.get("source", "web"))
+        requirement_slot = _requirement_slot_from_node(node)
         query = str(node.inputs.get("query") or self._query_from_url(self.page.url) or self._query_from_url(observation.url) or "")
         normalized = self._rank_links(links, source, query)
-        if source == "shopping" and not normalized:
-            normalized = self._shopping_seed_links(query or str(observation.text or ""))
-        if source == "video" and not normalized:
-            normalized = self._video_seed_links(query or str(observation.text or ""))
         if source == "github":
-            normalized = self._github_api_links(query) or normalized
-            if not normalized:
-                normalized = self._github_seed_links(query or str(observation.text or ""))
+            api_links = self._github_api_links(query)
+            normalized = api_links or normalized
         title = self.page.title()
         text = self._body_text()
         evidence = [
@@ -649,6 +845,11 @@ class BrowserSession:
         ]
         fields = {"links": normalized, "source": source, "query": query}
         fields.update(self._page_snapshot_fields(node.id))
+        self._attach_slot_signals(
+            fields,
+            requirement_slot,
+            {"links": normalized, "query": query, "source": source, "page_title": title, "page_text": text},
+        )
         return ActionResult(
             ok=bool(normalized),
             action=node.action,
@@ -659,6 +860,23 @@ class BrowserSession:
             evidence=evidence,
             error=None if normalized else "no_links_collected",
         )
+
+    def _observation_links(self, observation: Observation) -> List[Dict[str, str]]:
+        synthesized: List[Dict[str, str]] = []
+        seen = set()
+        for item in observation.elements or []:
+            if not isinstance(item, dict):
+                continue
+            href = str(item.get("href") or item.get("url") or "").strip()
+            text = _clean_text(
+                str(item.get("text") or item.get("name") or item.get("label") or ""),
+                140,
+            )
+            if not href or not text or href in seen:
+                continue
+            seen.add(href)
+            synthesized.append({"text": text, "href": href})
+        return synthesized
 
     def _search_result_links(self) -> List[Dict[str, str]]:
         assert self.page is not None
@@ -703,11 +921,23 @@ class BrowserSession:
 
     def _summarize_text(self, node: WorkflowNode, observation: Observation) -> ActionResult:
         source = str(node.inputs.get("source", "web"))
+        requirement_slot = _requirement_slot_from_node(node)
         support = observation.text or observation.title or observation.url
         summary = _clean_text(support, 1000)
         fields = {"summary": summary, "source": source, "links": observation.elements}
         if isinstance(observation.extracted_fields.get("video_digest"), dict):
             fields["video_digest"] = observation.extracted_fields["video_digest"]
+        self._attach_slot_signals(
+            fields,
+            requirement_slot,
+            {
+                "summary": summary,
+                "links": observation.elements,
+                "video_digest": observation.extracted_fields.get("video_digest"),
+                "text": observation.text,
+                "title": observation.title,
+            },
+        )
         return ActionResult(
             ok=bool(summary),
             action=node.action,
@@ -731,6 +961,45 @@ class BrowserSession:
             pass
         return self._extract_page(node)
 
+    def _attach_slot_signals(self, fields: Dict[str, Any], requirement_slot: str, payload: Dict[str, Any]) -> None:
+        if not requirement_slot:
+            return
+        fields.setdefault("requirement_slot", requirement_slot)
+        signal_field = _slot_signal_field(requirement_slot)
+        fields[signal_field] = self._slot_signal_payload(requirement_slot, payload)
+
+    def _slot_signal_payload(self, requirement_slot: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        links = payload.get("links") if isinstance(payload.get("links"), list) else []
+        readings = payload.get("readings") if isinstance(payload.get("readings"), list) else []
+        transcript = str(payload.get("transcript") or "")
+        digest = payload.get("digest") if isinstance(payload.get("digest"), dict) else {}
+        summary = str(payload.get("summary") or payload.get("combined_text") or payload.get("text") or payload.get("support") or "")
+        base = {"slot": requirement_slot, "evidence_count": len(links) + len(readings), "summary": _clean_text(summary, 800)}
+        if requirement_slot in {"candidate_pool", "repo_candidates", "video_candidates"}:
+            base.update({"candidates": links[:10], "query": payload.get("query", ""), "source": payload.get("source", "")})
+        elif requirement_slot == "repo_metadata":
+            repo_cards = [reading.get("repo", {}) for reading in readings if isinstance(reading.get("repo"), dict)]
+            base.update({"repositories": repo_cards, "readings": readings[:5], "doc_coverage": sum(1 for repo in repo_cards if repo.get("readme_excerpt"))})
+        elif requirement_slot == "implementation_docs":
+            base.update(
+                {
+                    "readings": readings[:5],
+                    "doc_sources": [reading.get("url") for reading in readings[:5] if reading.get("url")],
+                    "doc_coverage": sum(1 for reading in readings if str(reading.get("text") or reading.get("description") or "").strip()),
+                }
+            )
+        elif requirement_slot in {"comparative_reviews", "ecosystem_comparison", "marketplace_pages"}:
+            base.update({"readings": readings[:5], "candidate_count": len(links), "source": payload.get("source", "")})
+        elif requirement_slot == "user_comments":
+            base.update({"comment_pages": links[:10], "readings": readings[:5], "comment_signal": bool(summary)})
+        elif requirement_slot == "transcript_notes":
+            base.update({"transcript_excerpt": _clean_text(transcript, 1200), "video_title": digest.get("title"), "chapter_count": len(digest.get("candidate_video_links") or [])})
+        elif requirement_slot == "visual_evidence":
+            base.update({"screenshot_path": payload.get("screenshot_path") or digest.get("screenshot_path"), "has_visual_summary": bool(summary)})
+        else:
+            base.update({"payload_keys": sorted(payload.keys())})
+        return base
+
     def _type_text(self, node: WorkflowNode, observation: Observation) -> ActionResult:
         assert self.page is not None
         locator = self._locator_for_ref(node, observation)
@@ -744,6 +1013,19 @@ class BrowserSession:
             locator.fill(text, timeout=5000)
         else:
             locator.type(text, timeout=5000)
+        if bool(node.inputs.get("submit_after_type", False)):
+            submit_meta = self._submit_after_typing(locator, observation)
+            if not submit_meta.get("ok"):
+                return ActionResult(
+                    ok=False,
+                    action=node.action,
+                    url=self.page.url,
+                    error="submit_after_type_failed",
+                    fields={"submit_after_type": submit_meta},
+                )
+            extracted = self._extract_page(node)
+            extracted.fields["submit_after_type"] = submit_meta
+            return extracted
         return self._extract_page(node)
 
     def _select_option(self, node: WorkflowNode, observation: Observation) -> ActionResult:
@@ -788,11 +1070,100 @@ class BrowserSession:
         self.page.keyboard.press(key)
         return self._extract_page(node)
 
+    def _submit_after_typing(self, locator, observation: Observation) -> Dict[str, Any]:
+        assert self.page is not None
+        methods: List[str] = []
+        before_url = self.page.url
+        before_title = ""
+        before_text = ""
+        try:
+            before_title = self.page.title()
+        except PlaywrightError:
+            before_title = ""
+        try:
+            before_text = self._body_text()
+        except PlaywrightError:
+            before_text = ""
+
+        def page_advanced() -> bool:
+            current_url = self.page.url
+            if current_url and current_url != before_url:
+                return True
+            try:
+                current_title = self.page.title()
+            except PlaywrightError:
+                current_title = ""
+            if current_title and current_title != before_title:
+                return True
+            try:
+                current_text = self._body_text()
+            except PlaywrightError:
+                current_text = ""
+            return bool(current_text and current_text != before_text)
+
+        try:
+            locator.press("Enter", timeout=3000)
+            methods.append("press_enter")
+            try:
+                self.page.wait_for_load_state("domcontentloaded", timeout=3000)
+            except PlaywrightTimeoutError:
+                pass
+            if page_advanced():
+                return {"ok": True, "method": "press_enter", "methods_tried": methods}
+        except PlaywrightError:
+            methods.append("press_enter_failed")
+
+        try:
+            locator.evaluate(
+                """el => {
+                    const form = el && typeof el.closest === "function" ? el.closest("form") : null;
+                    if (!form) {
+                        return false;
+                    }
+                    if (typeof form.requestSubmit === "function") {
+                        form.requestSubmit();
+                    } else {
+                        form.submit();
+                    }
+                    return true;
+                }"""
+            )
+            methods.append("request_submit")
+            try:
+                self.page.wait_for_load_state("domcontentloaded", timeout=3000)
+            except PlaywrightTimeoutError:
+                pass
+            if page_advanced():
+                return {"ok": True, "method": "request_submit", "methods_tried": methods}
+        except PlaywrightError:
+            methods.append("request_submit_failed")
+
+        search_button = self._find_search_button_ref(observation)
+        if search_button is not None:
+            button_locator = self._locator_for_element_ref(search_button, observation)
+            if button_locator is not None:
+                try:
+                    button_locator.click(timeout=3000)
+                    methods.append("click_search_button")
+                    try:
+                        self.page.wait_for_load_state("domcontentloaded", timeout=3000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    if page_advanced():
+                        return {"ok": True, "method": "click_search_button", "element_ref": search_button, "methods_tried": methods}
+                except PlaywrightError:
+                    methods.append("click_search_button_failed")
+        return {"ok": False, "methods_tried": methods}
+
     def _locator_for_ref(self, node: WorkflowNode, observation: Observation):
         assert self.page is not None
         ref = node.inputs.get("element_ref")
         if ref is None:
             ref = node.inputs.get("element_id")
+        return self._locator_for_element_ref(ref, observation)
+
+    def _locator_for_element_ref(self, ref, observation: Observation):
+        assert self.page is not None
         selector = ""
         if isinstance(ref, dict):
             selector = str(ref.get("selector") or "")
@@ -805,9 +1176,36 @@ class BrowserSession:
                     selector = str(item.get("selector") or "")
                     break
         if selector:
-            return self.page.locator(selector).first()
+            return self.page.locator(selector).first
         if ref is not None:
-            return self.page.locator(f'[data-agent-idx="{ref}"]').first()
+            return self.page.locator(f'[data-agent-idx="{ref}"]').first
+        return None
+
+    def _find_search_button_ref(self, observation: Observation):
+        groups = [observation.visible_buttons or [], observation.elements or []]
+        for group in groups:
+            for item in group:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role") or "").lower()
+                name = f"{item.get('name', '')} {item.get('label', '')} {item.get('text', '')}".lower()
+                if role == "button" and any(token in name for token in ["search", "搜索", "submit", "go", "查找"]):
+                    return item.get("element_id", item.get("id"))
+        return None
+
+    def _find_searchbox_ref(self, observation: Observation):
+        groups = [observation.form_fields or [], observation.accessibility_tree or [], observation.elements or []]
+        for group in groups:
+            for item in group:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role") or "").lower()
+                tag = str(item.get("tag") or "").lower()
+                name = f"{item.get('name', '')} {item.get('label', '')} {item.get('text', '')}".lower()
+                if role in {"searchbox", "textbox", "combobox"} and any(token in name for token in ["search", "搜索", "query", "keyword", "关键词", "jump", "find"]):
+                    return item.get("element_id", item.get("id"))
+                if tag in {"input", "textarea"} and any(token in name for token in ["search", "搜索", "query", "keyword", "关键词", "jump", "find"]):
+                    return item.get("element_id", item.get("id"))
         return None
 
     def _body_text(self) -> str:
@@ -1034,50 +1432,6 @@ class BrowserSession:
                 break
         return ranked
 
-    def _shopping_seed_links(self, query: str) -> List[Dict[str, str]]:
-        if not any(term in query.lower() for term in ["耳机", "headphone", "wh-ch720n", "w820nb", "q45"]):
-            return []
-        return [
-            {
-                "text": "RTINGS: Anker Soundcore Space Q45 vs Sony WH-CH720N Wireless headphones comparison",
-                "href": "https://www.rtings.com/headphones/tools/compare/anker-soundcore-space-q45-wireless-sony-wh-ch720n-wireless/34852/38908",
-            },
-            {
-                "text": "What Hi-Fi?: Sony WH-CH720N affordable ANC headphones review",
-                "href": "https://www.whathifi.com/reviews/sony-wh-ch720n",
-            },
-            {
-                "text": "Edifier W820NB Plus wireless noise cancellation over-ear headphones product page",
-                "href": "https://www.edifier.com/int/us/p/over-ear-on-ear-headphones/w820nb-plus",
-            },
-            {
-                "text": "Soundcore Space Q45 adaptive noise cancelling headphones product page",
-                "href": "https://www.soundcore.com/products/space-q45-a3040011",
-            },
-            {
-                "text": "Sony WH-CH720N headphone official product page",
-                "href": "https://www.sony.jp/headphone/products/WH-CH720N/",
-            },
-        ]
-
-    def _video_seed_links(self, query: str) -> List[Dict[str, str]]:
-        if "clip" not in query.lower() and "多模态" not in query:
-            return []
-        return [
-            {
-                "text": "多模态模型CLIP深度讲解 - bilibili",
-                "href": "https://www.bilibili.com/video/BV1pYmDYgEDW/",
-            },
-            {
-                "text": "CLIP深度解析 多模态模型教程 - bilibili",
-                "href": "https://www.bilibili.com/video/BV1f8sHzBEYc/",
-            },
-            {
-                "text": "多模态入门 ViT CLIP GLIP SAM AIGC 实战串讲 - bilibili",
-                "href": "https://www.bilibili.com/video/BV1NN41177Zp/",
-            },
-        ]
-
     def _query_from_url(self, url: str) -> str:
         parsed = urlparse(url)
         return parse_qs(parsed.query).get("q", [""])[0]
@@ -1101,33 +1455,6 @@ class BrowserSession:
             if full_name and html_url:
                 repos.append({"text": f"{full_name} ({stars} stars) - {description}", "href": html_url})
         return repos
-
-    def _github_seed_links(self, query: str) -> List[Dict[str, str]]:
-        text = query.lower()
-        if not any(term in text for term in ["browser", "agent", "automation", "llm", "浏览器", "智能体"]):
-            return []
-        return [
-            {
-                "text": "browser-use/browser-use - browser-state driven automation for AI agents",
-                "href": "https://github.com/browser-use/browser-use",
-            },
-            {
-                "text": "microsoft/playwright - reliable browser automation library",
-                "href": "https://github.com/microsoft/playwright",
-            },
-            {
-                "text": "mendableai/firecrawl - search/crawl/scrape to structured content",
-                "href": "https://github.com/mendableai/firecrawl",
-            },
-            {
-                "text": "TencentCloudADP/youtu-agent - multi-agent tool orchestration",
-                "href": "https://github.com/TencentCloudADP/youtu-agent",
-            },
-            {
-                "text": "browserbase/stagehand - AI browser automation framework",
-                "href": "https://github.com/browserbase/stagehand",
-            },
-        ]
 
     def _link_matches_source(self, href: str, source: str) -> bool:
         parsed = urlparse(href)
