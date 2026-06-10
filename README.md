@@ -1,233 +1,304 @@
-# Browser Workflow Automation Platform
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/2ccdb752-22fb-41c7-8948-857fc1ad7e24">
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/774a46d5-27a0-490c-b7d0-e65fcbbfa358">
+  <img alt="Shows a black Browser Use Logo in light color mode and a white one in dark color mode." src="https://github.com/user-attachments/assets/2ccdb752-22fb-41c7-8948-857fc1ad7e24"  width="full">
+</picture>
 
-Browser Workflow Automation Platform is a harness-first browser agent MVP:
+<div align="center">
+    <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/9955dda9-ede3-4971-8ee0-91cbc3850125">
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6797d09b-8ac3-4cb9-ba07-b289e080765a">
+    <img alt="The AI browser agent." src="https://github.com/user-attachments/assets/9955dda9-ede3-4971-8ee0-91cbc3850125"  width="400">
+    </picture>
+</div>
 
-`Goal -> WorkflowSpec -> Browser Execution -> Verification -> Evidence -> Report`
+<div align="center">
+<a href="https://cloud.browser-use.com?utm_source=github&utm_medium=readme-badge-downloads"><img src="https://media.browser-use.tools/badges/package" height="48" alt="Browser-Use Package Download Statistics"></a>
+</div>
 
-With LLM enabled, the effective runtime loop is:
+---
 
-```text
-Goal -> Evidence Checklist -> Observe Page -> LLM Next Action -> Browser Execute -> Verify -> Memory -> Repeat/Stop -> Report
+<div align="center">
+<a href="#demos"><img src="https://media.browser-use.tools/badges/demos" alt="Demos"></a>
+<img width="16" height="1" alt="">
+<a href="https://docs.browser-use.com"><img src="https://media.browser-use.tools/badges/docs" alt="Docs"></a>
+<img width="16" height="1" alt="">
+<a href="https://browser-use.com/posts"><img src="https://media.browser-use.tools/badges/blog" alt="Blog"></a>
+<img width="16" height="1" alt="">
+<a href="https://browsermerch.com"><img src="https://media.browser-use.tools/badges/merch" alt="Merch"></a>
+<img width="100" height="1" alt="">
+<a href="https://github.com/browser-use/browser-use"><img src="https://media.browser-use.tools/badges/github" alt="Github Stars"></a>
+<img width="4" height="1" alt="">
+<a href="https://x.com/intent/user?screen_name=browser_use"><img src="https://media.browser-use.tools/badges/twitter" alt="Twitter"></a>
+<img width="4" height="1" alt="">
+<a href="https://link.browser-use.com/discord"><img src="https://media.browser-use.tools/badges/discord" alt="Discord"></a>
+<img width="4" height="1" alt="">
+<a href="https://cloud.browser-use.com?utm_source=github&utm_medium=readme-badge-cloud"><img src="https://media.browser-use.tools/badges/cloud" height="48" alt="Browser-Use Cloud"></a>
+</div>
+
+</br>
+
+🌤️ Want to skip the setup? Use our <b>[cloud](https://cloud.browser-use.com?utm_source=github&utm_medium=readme-skip-setup)</b> for faster, scalable, stealth-enabled browser automation!
+
+# 🤖 LLM Quickstart
+
+1. Direct your favorite coding agent (Cursor, Claude Code, etc) to [Agents.md](https://docs.browser-use.com/llms-full.txt)
+2. Prompt away!
+
+<br/>
+
+# 👋 Human Quickstart
+
+**1. Create environment and install Browser-Use with [uv](https://docs.astral.sh/uv/) (Python>=3.11):**
+```bash
+uv init && uv add browser-use && uv sync
+# uvx browser-use install  # Run if you don't have Chromium installed
 ```
 
-The first runnable version can run with an OpenAI-compatible multimodal model as the LLM agent. When `--use-llm` and a valid API key are configured, the runtime uses an observation-driven agent loop: observe the current page, ask the LLM to choose the next safe browser action, execute it, verify progress, update memory, and repeat. Research workflows no longer carry fixed action templates; without an enabled LLM, they produce a workflow shell and do not run browser actions.
+**2. [Optional] Get your API key from [Browser Use Cloud](https://cloud.browser-use.com/new-api-key?utm_source=github&utm_medium=readme-quickstart-api-key):**
+```
+# .env
+BROWSER_USE_API_KEY=your-key
+# GOOGLE_API_KEY=your-key
+# ANTHROPIC_API_KEY=your-key
+```
 
-Browser Copilot Agent is a harness-first browser agent project:
-`LLM + Browser Harness + Memory + Verification + Self-evolution`
+**3. Run your first agent:**
+```python
+from browser_use import Agent, Browser, ChatBrowserUse
+# from browser_use import ChatGoogle  # ChatGoogle(model='gemini-3-flash-preview')
+# from browser_use import ChatAnthropic  # ChatAnthropic(model='claude-sonnet-4-6')
+import asyncio
 
-## Quick Start
+async def main():
+    browser = Browser(
+        # use_cloud=True,  # Use a stealth browser on Browser Use Cloud
+    )
+
+    agent = Agent(
+        task="Find the number of stars of the browser-use repo",
+        llm=ChatBrowserUse(),
+        # llm=ChatGoogle(model='gemini-3-flash-preview'),
+        # llm=ChatAnthropic(model='claude-sonnet-4-6'),
+        browser=browser,
+    )
+    await agent.run()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Check out the [library docs](https://docs.browser-use.com/open-source/introduction) and the [cloud docs](https://docs.cloud.browser-use.com?utm_source=github&utm_medium=readme-cloud-docs) for more!
+
+<br/>
+
+# Open Source vs Cloud
+
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="static/accuracy_by_model_light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="static/accuracy_by_model_dark.png">
+  <img alt="BU Bench V1 - LLM Success Rates" src="static/accuracy_by_model_light.png" width="100%">
+</picture>
+
+We benchmark Browser Use across 100 real-world browser tasks. Full benchmark is open source: **[browser-use/benchmark](https://github.com/browser-use/benchmark)**.
+
+**Use the Open-Source Agent**
+- You need [custom tools](https://docs.browser-use.com/customize/tools/basics) or deep code-level integration
+- We recommend pairing with our [cloud browsers](https://docs.browser-use.com/open-source/customize/browser/remote) for leading stealth, proxy rotation, and scaling
+- Or self-host the open-source agent fully on your own machines
+
+**Use the [Fully-Hosted Cloud Agent](https://cloud.browser-use.com?utm_source=github&utm_medium=readme-hosted-agent) (recommended)**
+- Much more powerful agent for complex tasks (see plot above)
+- Easiest way to start and scale
+- Best stealth with proxy rotation and captcha solving
+- 1000+ integrations (Gmail, Slack, Notion, and more)
+- Persistent filesystem and memory
+
+<br/>
+
+# Demos
+
+
+### 📋 Form-Filling
+#### Task = "Fill in this job application with my resume and information."
+![Job Application Demo](https://github.com/user-attachments/assets/57865ee6-6004-49d5-b2c2-6dff39ec2ba9)
+[Example code ↗](https://github.com/browser-use/browser-use/blob/main/examples/use-cases/apply_to_job.py)
+
+
+### 🍎 Grocery-Shopping
+#### Task = "Put this list of items into my instacart."
+
+https://github.com/user-attachments/assets/a6813fa7-4a7c-40a6-b4aa-382bf88b1850
+
+[Example code ↗](https://github.com/browser-use/browser-use/blob/main/examples/use-cases/buy_groceries.py)
+
+
+### 💻 Personal-Assistant.
+#### Task = "Help me find parts for a custom PC."
+
+https://github.com/user-attachments/assets/ac34f75c-057a-43ef-ad06-5b2c9d42bf06
+
+[Example code ↗](https://github.com/browser-use/browser-use/blob/main/examples/use-cases/pcpartpicker.py)
+
+
+### 💡See [more examples here ↗](https://docs.browser-use.com/examples) and give us a star!
+
+<br/>
+
+# 🚀 Template Quickstart
+
+**Want to get started even faster?** Generate a ready-to-run template:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-python3 -m playwright install chromium
-cp .env.example .env
-python3 app.py --goal "帮我比较三款耳机并推荐"
-
-python -m venv .venv
-.venv\Scripts\activate
-python -m pip install -r requirements.txt
-python app.py --goal "帮我比较三款耳机并推荐"
+uvx browser-use init --template default
 ```
 
-## Demos
+This creates a `browser_use_default.py` file with a working example. Available templates:
+- `default` - Minimal setup to get started quickly
+- `advanced` - All configuration options with detailed comments
+- `tools` - Examples of custom tools and extending the agent
+
+You can also specify a custom output path:
+```bash
+uvx browser-use init --template default --output my_agent.py
+```
+
+<br/>
+
+# 💻 CLI
+
+Fast, persistent browser automation from the command line:
 
 ```bash
-python3 app.py \
-  --domain github \
-  --goal "帮我找多模态OOD相关开源项目" \
-  --url "https://github.com"
-
-python3 app.py \
-  --domain paper \
-  --goal "找最近 Agent hallucination 的论文" \
-  --url "https://arxiv.org"
+browser-use open https://example.com    # Navigate to URL
+browser-use state                       # See clickable elements
+browser-use click 5                     # Click element by index
+browser-use type "Hello"                # Type text
+browser-use screenshot page.png         # Take screenshot
+browser-use close                       # Close browser
 ```
 
-Use `--headed` if you want to watch the browser window during execution.
+The CLI keeps the browser running between commands for fast iteration. See [CLI docs](browser_use/skill_cli/README.md) for all commands.
 
-## Agent/API Config
+### Claude Code Skill
 
-The default LLM provider is an OpenAI-compatible endpoint. Put the real key in `.env` or export it in your shell; do not commit secrets.
-
-Config can come from `.env`, shell environment, or CLI flags:
+For [Claude Code](https://claude.ai/code), install the skill to enable AI-assisted browser automation:
 
 ```bash
-python3 app.py \
-  --domain github \
-  --goal "帮我找多模态OOD相关开源项目" \
-  --provider openai_compatible \
-  --model gpt-5.5 \
-  --api-key-env BROWSER_AGENT_API_KEY \
-  --api-base-url https://synai996.space/v1 \
-  --use-llm
+mkdir -p ~/.claude/skills/browser-use
+curl -o ~/.claude/skills/browser-use/SKILL.md \
+  https://raw.githubusercontent.com/browser-use/browser-use/main/skills/browser-use/SKILL.md
 ```
 
-Relevant environment variables:
+<br/>
 
-```text
-BROWSER_AGENT_NAME
-BROWSER_AGENT_PROVIDER
-BROWSER_AGENT_MODEL
-BROWSER_AGENT_MODEL_FALLBACKS
-BROWSER_AGENT_API_BASE_URL
-BROWSER_AGENT_API_KEY_ENV
-BROWSER_AGENT_USE_LLM
-BROWSER_AGENT_API_KEY
-BROWSER_AGENT_VISION_PROVIDER
-BROWSER_AGENT_VISION_MODEL
-BROWSER_AGENT_VISION_MODEL_FALLBACKS
-BROWSER_AGENT_VISION_API_BASE_URL
-BROWSER_AGENT_VISION_API_KEY_ENV
-BROWSER_AGENT_HTTP_USER_AGENT
-BROWSER_AGENT_LLM_TIMEOUT_SEC
-BROWSER_AGENT_VISION_TIMEOUT_SEC
-BROWSER_AGENT_PLANNER_MAX_TOKENS
-BROWSER_AGENT_REPORT_MAX_TOKENS
-BROWSER_AGENT_REPORT_RETRY_MAX_TOKENS
-BROWSER_AGENT_USE_MULTIMODAL_PLANNING
-BROWSER_AGENT_USE_VISUAL_PRECHECK
+## Integrations, hosting, custom tools, MCP, and more on our [Docs ↗](https://docs.browser-use.com)
+
+<br/>
+
+# FAQ
+
+<details>
+<summary><b>What's the best model to use?</b></summary>
+
+We optimized **ChatBrowserUse()** specifically for browser automation tasks. On avg it completes tasks 3-5x faster than other models with SOTA accuracy.
+
+**Pricing (per 1M tokens):**
+- Input tokens: $0.20
+- Cached input tokens: $0.02
+- Output tokens: $2.00
+
+For other LLM providers, see our [supported models documentation](https://docs.browser-use.com/supported-models).
+</details>
+
+<details>
+<summary><b>Should I use the Browser Use system prompt with the open-source preview model?</b></summary>
+
+Yes. If you use `ChatBrowserUse(model='browser-use/bu-30b-a3b-preview')` with a normal `Agent(...)`, Browser Use still sends its default agent system prompt for you.
+
+You do **not** need to add a separate custom "Browser Use system message" just because you switched to the open-source preview model. Only use `extend_system_message` or `override_system_message` when you intentionally want to customize the default behavior for your task.
+
+If you want the best default speed/accuracy, we still recommend the newer hosted `bu-*` models. If you want the open-source preview model, the setup stays the same apart from the `model=` value.
+</details>
+
+<details>
+<summary><b>Can I use custom tools with the agent?</b></summary>
+
+Yes! You can add custom tools to extend the agent's capabilities:
+
+```python
+from browser_use import Tools
+
+tools = Tools()
+
+@tools.action(description='Description of what this tool does.')
+def custom_tool(param: str) -> str:
+    return f"Result: {param}"
+
+agent = Agent(
+    task="Your task",
+    llm=llm,
+    browser=browser,
+    tools=tools,
+)
 ```
 
-Multimodal planning sends the current screenshot to the same OpenAI-compatible model whenever a screenshot is available:
+</details>
 
-```bash
-python3 app.py \
-  --domain shopping \
-  --goal "预算1000元以内，推荐一款适合通勤和办公室使用的降噪耳机" \
-  --url "https://www.bing.com" \
-  --max-steps 8 \
-  --use-llm \
-  --provider openai_compatible \
-  --model gpt-5.5 \
-  --api-key-env BROWSER_AGENT_API_KEY \
-  --api-base-url https://synai996.space/v1 \
-  --vision-provider openai_compatible \
-  --vision-model gpt-5.5 \
-  --vision-api-key-env BROWSER_AGENT_API_KEY \
-  --vision-api-base-url https://synai996.space/v1
-```
+<details>
+<summary><b>Can I use this for free?</b></summary>
 
-## Output
+Yes! Browser-Use is open source and free to use. You only need to choose an LLM provider (like OpenAI, Google, ChatBrowserUse, or run local models with Ollama).
+</details>
 
-Each run writes the latest structured result to:
+<details>
+<summary><b>Terms of Service</b></summary>
 
-```text
-runs/latest-run.json
-```
+This open-source library is licensed under the MIT License. For Browser Use services & data policy, see our [Terms of Service](https://browser-use.com/legal/terms-of-service) and [Privacy Policy](https://browser-use.com/privacy/).
+</details>
 
-Each run also writes a human-readable Markdown report to `runs/latest-report.md`; the backend serves it from `GET /api/latest-report`.
+<details>
+<summary><b>How do I handle authentication?</b></summary>
 
-The result includes:
+Check out our authentication examples:
+- [Using real browser profiles](https://github.com/browser-use/browser-use/blob/main/examples/browser/real_browser.py) - Reuse your existing Chrome profile with saved logins
+- If you want to use temporary accounts with inbox, choose AgentMail
+- To sync your auth profile with the remote browser, run `curl -fsSL https://browser-use.com/profile.sh | BROWSER_USE_API_KEY=XXXX sh` (replace XXXX with your API key)
 
-- `workflow`: generated workflow spec and nodes
-- `steps`: execution results and fallback information
-- `memory.evidence`: source-bound evidence items
-- `report`: summary, candidates, recommendations, decision criteria, comparison matrix, video digest, uncertainties, and next actions
-- `events`: trace records for observability
-- `metrics`: step accuracy plus task-level checklist coverage, final-answer grounding, citation correctness, and browser-state goal matching
+These examples show how to maintain sessions and handle authentication seamlessly.
+</details>
 
-## Agent Loop Capabilities
+<details>
+<summary><b>How do I solve CAPTCHAs?</b></summary>
 
-The dynamic browser agent now observes more than URL/title/body text. Each browser step can attach:
+For CAPTCHA handling, you need better browser fingerprinting and proxies. Use [Browser Use Cloud](https://cloud.browser-use.com?utm_source=github&utm_medium=readme-faq-captcha) which provides stealth browsers designed to avoid detection and CAPTCHA challenges.
+</details>
 
-- interactable elements with `element_id`, role/name/text, selector, and bounding box
-- form fields, visible buttons, and a compact accessibility-style tree
-- screenshot path and optional multimodal visual summary
-- recent action history, failed actions, visited URLs, and repeated-query warnings
+<details>
+<summary><b>How do I go into production?</b></summary>
 
-The LLM can choose safe low-level browser actions:
+Chrome can consume a lot of memory, and running many agents in parallel can be tricky to manage.
 
-```text
-goto, search_web, collect_links, open_candidate, deep_read_candidates,
-extract_page, extract_video, summarize_text, click_element, type_text,
-select_option, scroll, wait, back, press_key, stop
-```
+For production use cases, use our [Browser Use Cloud API](https://cloud.browser-use.com?utm_source=github&utm_medium=readme-faq-production) which handles:
+- Scalable browser infrastructure
+- Memory management
+- Proxy rotation
+- Stealth browser fingerprinting
+- High-performance parallel execution
+</details>
 
-Dynamic safety policy blocks purchase/payment/login/destructive actions and avoids repeating identical actions or searches.
+<br/>
 
-## Smarter Research And Video Tasks
+<div align="center">
 
-GitHub repository tasks now normalize browser-agent goals into source-friendly search queries and deep-read candidate repositories through the GitHub API. Reports can include stars, forks, language, license, update time, topics, and README excerpts for open-source project comparison.
-Reports now score comparison rows by domain-specific evidence and generate ranked recommendations with `score` and `score_reasons`, so users can see why a repo/product/video was recommended.
+**Tell your computer what to do, and it gets it done.**
 
+<img src="https://github.com/user-attachments/assets/06fa3078-8461-4560-b434-445510c1766f" width="400"/>
 
-With `--use-llm`, the planner now builds a visible research strategy instead of a single generic query, then the runtime uses the strategy as a checklist rather than a fixed script. The LLM receives current page state, candidate links, recent traces, memory evidence, available safe actions, and the evidence checklist each round, and chooses the next action dynamically.
+[![Twitter Follow](https://img.shields.io/twitter/follow/Magnus?style=social)](https://x.com/intent/user?screen_name=mamagnus00)
+&emsp;&emsp;&emsp;
+[![Twitter Follow](https://img.shields.io/twitter/follow/Gregor?style=social)](https://x.com/intent/user?screen_name=gregpr07)
 
-Example:
+</div>
 
-```bash
-python3 app.py \
-  --domain shopping \
-  --goal "预算1000元以内，推荐一款适合通勤和办公室使用的降噪耳机，要比较品牌、类型、价格、音质、降噪、佩戴舒适度和用户评价" \
-  --url "https://www.bing.com" \
-  --max-steps 10 \
-  --use-llm
-```
-
-Video tasks use `extract_video` to collect page metadata, visible transcript/description text, candidate video links, screenshots, YouTube oEmbed data, optional `yt-dlp` metadata, and optional key-frame extraction when `yt-dlp` plus `ffmpeg` are installed. Multimodal visual analysis supports Gemini or OpenAI-compatible vision models for screenshot/key-frame understanding, and safely reports an unavailable state when keys or media tools are missing.
-
-## Project Layout
-
-```text
-browser_agent/
-  planner/
-  browser/
-  harness/
-  memory/
-  verifier/
-  vision/
-  evaluation/
-docs/
-tests/
-app.py
-```
-
-## Checks
-
-```bash
-python3 -m compileall browser_agent app.py
-```
-
-## Docs
-
-- [Feature spec](docs/mvp-browser-research-copilot/03-feature-spec.md)
-- [Code walkthrough](docs/mvp-browser-research-copilot/04-code-walkthrough.md)
-- [GitHub references and multimodal roadmap](docs/github-references-and-multimodal-roadmap.md)
-
-## Regression Checks
-
-Run the full lightweight regression suite with:
-
-```bash
-tests/run_checks.sh
-```
-
-It covers Python compile checks, Chrome extension syntax/manifest checks, monitor scoring for shopping/video/browser tasks, backend relevance filters, and Gemini's no-key fallback behavior.
-
-The Chrome extension popup renders structured cards for summaries, visible planning, recommendations, comparison evidence, video digest, multimodal status, and monitor traces instead of raw JSON.
-The extension monitor can also derive safe page actions from live browser state, such as filling visible search boxes or opening verified candidate links, before falling back to URL navigation.
-
-## Built-in Scenarios
-
-- Comparison and recommendation
-- Form filling
-- Web research
-- Booking and reservation
-- Lead collection
-- Monitoring and alerts
-- QA and regression checks
-
-## Productized Strengths
-
-- Scenario-aware planner with explicit routing and deliverables
-- Sensitive action handoff before high-risk browser commits
-- Evidence-rich run outputs with events, memory, verification, and metrics
-- Built-in market comparison against mainstream browser-agent products
-- Deterministic `unittest` coverage for homework demos and regressions
-
-## Notes
-
-- This repository keeps the original harness-first skeleton and extends it with four additional browser-control scenarios.
-- Runtime behavior is deterministic so that homework demos and tests stay stable without a live browser session.
+<div align="center"> Made with ❤️ in Zurich and San Francisco </div>

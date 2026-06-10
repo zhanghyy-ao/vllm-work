@@ -1,1 +1,0 @@
-"""Browser Copilot Agent package."""

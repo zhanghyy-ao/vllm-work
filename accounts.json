@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "accounts": [
+    {
+      "id": "jd-phone-001",
+      "label": "京东账号",
+      "platform": "jd",
+      "domains": ["jd.com", "*.jd.com", "passport.jd.com"],
+      "credentials": {
+        "phone": "18553316106",
+        "login_method": "sms_code"
+      },
+      "metadata": {
+        "login_flow": "phone_sms",
+        "note": "使用手机验证码登录，发送验证码后需等待用户手动输入"
+      },
+      "created_at": "2026-06-09T08:00:00Z",
+      "updated_at": "2026-06-10T08:00:00Z"
+    },
+    {
+      "id": "taobao-phone-001",
+      "label": "淘宝账号",
+      "platform": "taobao",
+      "domains": ["taobao.com", "*.taobao.com", "login.taobao.com", "*.tmall.com"],
+      "credentials": {
+        "phone": "18553316106",
+        "login_method": "sms_code"
+      },
+      "metadata": {
+        "login_flow": "phone_sms",
+        "note": "使用手机验证码登录，发送验证码后需等待用户手动输入"
+      },
+      "created_at": "2026-06-09T08:00:00Z",
+      "updated_at": "2026-06-10T08:00:00Z"
+    },
+    {
+      "id": "demo-github-001",
+      "label": "My GitHub",
+      "platform": "github",
+      "domains": ["github.com", "*.github.com"],
+      "credentials": {
+        "username": "your_github_username",
+        "password": "your_github_password"
+      },
+      "metadata": {},
+      "created_at": "2026-06-09T08:00:00Z",
+      "updated_at": "2026-06-09T08:00:00Z"
+    }
+  ]
+}
