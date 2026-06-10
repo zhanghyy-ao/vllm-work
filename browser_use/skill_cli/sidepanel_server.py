@@ -92,14 +92,16 @@ class SidePanelServer:
 
 	async def health(self, request: web.Request) -> web.Response:
 		model = self.config.model or os.getenv('BROWSER_USE_LLM_MODEL') or os.getenv('DEFAULT_LLM') or 'auto'
-		return _cors_response({
-			'ok': True,
-			'model': model,
-			'fallback_model': self.config.fallback_model,
-			'cdp_url': self._resolve_cdp_url(),
-			'use_vision': self.config.use_vision,
-			'accounts_loaded': self.account_service is not None and len(self.account_service.get_all_accounts()) > 0,
-		})
+		return _cors_response(
+			{
+				'ok': True,
+				'model': model,
+				'fallback_model': self.config.fallback_model,
+				'cdp_url': self._resolve_cdp_url(),
+				'use_vision': self.config.use_vision,
+				'accounts_loaded': self.account_service is not None and len(self.account_service.get_all_accounts()) > 0,
+			}
+		)
 
 	async def options(self, request: web.Request) -> web.Response:
 		return _cors_response({})
@@ -261,7 +263,9 @@ def main() -> None:
 	parser.add_argument('--host', default=DEFAULT_HOST)
 	parser.add_argument('--port', type=int, default=DEFAULT_PORT)
 	parser.add_argument('--model', default=None)
-	parser.add_argument('--fallback-model', default=None, help='Fallback LLM used when the primary model errors (e.g. bad schema output)')
+	parser.add_argument(
+		'--fallback-model', default=None, help='Fallback LLM used when the primary model errors (e.g. bad schema output)'
+	)
 	parser.add_argument('--cdp-url', default=None)
 	parser.add_argument('--no-auto-cdp', action='store_true')
 	parser.add_argument('--max-steps', type=int, default=14)

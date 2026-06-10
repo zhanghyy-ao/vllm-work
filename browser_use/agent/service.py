@@ -240,15 +240,16 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if flash_mode:
 			enable_planning = False
 
-		# Auto-upgrade vision mode for multimodal models that support screenshot-based coordinate clicking
-		# For GPT-5/4o: keep use_vision=True (screenshot every step) but also keep the screenshot tool available
+		# Vision mode for multimodal models (GPT-5/4o):
+		# Use 'auto' (screenshot only when an action requests it, e.g. failed clicks) instead of
+		# every-step screenshots. This cuts image token cost + encode/transfer latency dramatically
+		# while keeping the screenshot tool available for when the model genuinely needs to "look".
 		model_name_lower = getattr(llm, 'model', '').lower() if hasattr(llm, 'model') else ''
 		self._force_keep_screenshot_tool = False
 		if use_vision is True and any(p in model_name_lower for p in ['gpt-5', 'gpt-4o', 'gpt-4-vision']):
-			# Don't change to 'auto' — keep True so screenshots are sent EVERY step
-			# But flag that screenshot tool should NOT be excluded
+			use_vision = 'auto'
 			self._force_keep_screenshot_tool = True
-			logger.info(f'👁️  Multimodal model detected ({getattr(llm, "model", "")}): screenshots every step + screenshot tool retained')
+			logger.info(f'👁️  Multimodal model ({getattr(llm, "model", "")}): on-demand screenshots (use_vision=auto) for speed')
 
 		# Auto-configure llm_screenshot_size for Claude Sonnet models
 		if llm_screenshot_size is None:
@@ -257,8 +258,8 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 				llm_screenshot_size = (1400, 850)
 				logger.info('🖼️  Auto-configured LLM screenshot size for Claude Sonnet: 1400x850')
 			elif isinstance(model_name, str) and ('gpt-5' in model_name or 'gpt-4o' in model_name):
-				llm_screenshot_size = (1400, 900)
-				logger.info(f'🖼️  Auto-configured LLM screenshot size for {model_name}: 1400x900')
+				llm_screenshot_size = (1280, 800)
+				logger.info(f'🖼️  Auto-configured LLM screenshot size for {model_name}: 1280x800')
 
 		if page_extraction_llm is None:
 			page_extraction_llm = llm
@@ -1121,10 +1122,19 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		assert self.browser_session is not None, 'BrowserSession is not set up'
 
 		self.logger.debug(f'🌐 Step {self.state.n_steps}: Getting browser state...')
-		# Always take screenshots for all steps
-		self.logger.debug('📸 Requesting browser state with include_screenshot=True')
+		# Decide whether to capture a screenshot this step.
+		# Capturing via CDP has real cost on heavy pages. We only NEED it when:
+		#   - use_vision is True (every step sends it to the LLM), or
+		#   - cloud sync is enabled (screenshots make the cloud timeline useful)
+		# When use_vision='auto' and cloud sync is off, skip capture for speed —
+		# the screenshot tool can still trigger an on-demand capture when the model asks.
+		from browser_use.config import CONFIG as _CONFIG
+
+		_cloud_sync_on = bool(getattr(_CONFIG, 'BROWSER_USE_CLOUD_SYNC', False))
+		_capture_screenshot = (self.settings.use_vision is True) or _cloud_sync_on
+		self.logger.debug(f'📸 Requesting browser state with include_screenshot={_capture_screenshot}')
 		browser_state_summary = await self.browser_session.get_browser_state_summary(
-			include_screenshot=True,  # always capture even if use_vision=False so that cloud sync is useful (it's fast now anyway)
+			include_screenshot=_capture_screenshot,
 			include_recent_events=self.include_recent_events,
 		)
 		if browser_state_summary.screenshot:
