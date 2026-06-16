@@ -6,6 +6,9 @@ import argparse
 import asyncio
 import json
 import os
+import re
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,8 +16,10 @@ from aiohttp import web
 from dotenv import load_dotenv
 
 from browser_use.accounts.service import AccountService
-from browser_use.assistant.research import BrowserResearchAssistant, ResearchAssistantConfig, render_report
-from browser_use.skill_cli.credential_store import CredentialStore, ensure_credential_store
+from browser_use.assistant.research import BrowserResearchAssistant, ResearchAssistantConfig, render_report, resolve_llm
+from browser_use.browser import BrowserSession
+from browser_use.llm.messages import SystemMessage, UserMessage
+from browser_use.skill_cli.credential_store import AutofillField, CredentialStore, ensure_credential_store
 
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 8765
@@ -74,9 +79,75 @@ def _page_context_prompt(page_context: dict[str, Any] | None) -> str:
 		f'{text[:12000] or "empty"}\n'
 		'Visible links:\n'
 		+ ('\n'.join(link_lines) if link_lines else 'none')
-		+ '\n\nUse this current page context as an already-open source when it is relevant. '
-		'If it is a verification, login, empty, or skeleton page, say so explicitly and continue with other allowed sources.'
+		+ '\n\nUse this current page context as your starting evidence when it is relevant. '
+		'If the user asks about the current page itself and the captured context is sufficient, answer from it without extra navigation. '
+		'If the task requires deeper files, linked pages, or external evidence, continue from this page rather than starting from a blank tab. '
+		'If it is a verification, login, empty, or skeleton page, say so explicitly and choose the next useful step.'
 	)
+
+
+def _is_browser_action_task(task: str) -> bool:
+	"""Return True for direct browser-control tasks that should run the Agent."""
+
+	text = task.strip().lower()
+	if re.search(r'https?://', text) and re.search(
+		r'\b(go|open|visit|navigate|click|fill|type|login|log in|sign in|submit|solve|complete|download|upload)\b',
+		text,
+	):
+		return True
+	if re.search(
+		r'\b(go to|open|visit|navigate to|click|fill|type|login|log in|sign in|submit|solve|complete|download|upload)\b',
+		text,
+	):
+		return True
+	if re.search(r'(打开|访问|进入|点击|填写|输入|登录|登陆|提交|完成|下载|上传|验证码)', task):
+		return True
+	return False
+
+
+def _should_use_research_assistant(task: str, payload: dict[str, Any]) -> bool:
+	"""Route side-panel requests to report mode only when they are research-like."""
+
+	if payload.get('assistant_mode') == 'agent':
+		return False
+	if payload.get('assistant_mode') == 'research':
+		return True
+	if _is_browser_action_task(task):
+		return False
+	text = task.lower()
+	if re.search(r'\b(compare|comparison|versus|vs|research|investigate|analyze|analysis|survey|report)\b', text):
+		return True
+	if re.search(r'(比较|对比|调研|研究|分析|报告|总结)', task):
+		return True
+	return False
+
+
+def _is_page_context_analysis_task(task: str, page_context: dict[str, Any] | None) -> bool:
+	"""Return True for tasks that should answer from the captured side-panel page only."""
+
+	if not page_context:
+		return False
+	text = task.strip().lower()
+	if _is_browser_action_task(task):
+		return False
+	current_page_signal = bool(
+		re.search(r'\b(current|this page|this file|this repository|this repo|current page|current file)\b', text)
+		or re.search(r'(当前|现在|这个页面|这个文件|此页面|此文件|这个仓库|当前页面|当前文件)', task)
+	)
+	if not current_page_signal:
+		return False
+	if re.search(
+		r'\b(explain|summarize|describe|analyze|overview|architecture|structure|framework|codebase|repository|repo|'
+		r'tell me about)\b',
+		text,
+	):
+		return True
+	if re.search(
+		r'(讲解|解释|介绍|总结|概括|分析|架构|框架|结构|代码框架|代码结构|仓库|项目|页面)',
+		task,
+	):
+		return True
+	return False
 
 
 class SidePanelServer:
@@ -89,6 +160,7 @@ class SidePanelServer:
 		accounts_path = config.accounts_file or os.getenv('BROWSER_USE_ACCOUNTS_FILE')
 		if accounts_path:
 			self.account_service = AccountService(path=accounts_path)
+		self.jobs: dict[str, dict[str, Any]] = {}
 
 	async def health(self, request: web.Request) -> web.Response:
 		model = self.config.model or os.getenv('BROWSER_USE_LLM_MODEL') or os.getenv('DEFAULT_LLM') or 'auto'
@@ -140,6 +212,64 @@ class SidePanelServer:
 			return _cors_response({'error': 'No matching autofill profile for this URL'}, status=404)
 		return _cors_response({'profile': resolved})
 
+	async def autofill_create(self, request: web.Request) -> web.Response:
+		try:
+			payload = await request.json()
+		except json.JSONDecodeError:
+			return _cors_response({'error': 'Invalid JSON body'}, status=400)
+
+		label = str(payload.get('label') or '').strip()
+		url = str(payload.get('url') or '').strip()
+		login_method = str(payload.get('login_method') or '').strip()
+		if not label:
+			return _cors_response({'error': 'label is required'}, status=400)
+		if not url.lower().startswith(('http://', 'https://')):
+			return _cors_response({'error': 'url must start with http:// or https://'}, status=400)
+		if login_method not in {'password', 'phone'}:
+			return _cors_response({'error': 'login_method must be "password" or "phone"'}, status=400)
+
+		fields: list[AutofillField] = []
+		if login_method == 'password':
+			username = str(payload.get('username') or '').strip()
+			password = str(payload.get('password') or '')
+			if not username or not password:
+				return _cors_response({'error': 'username and password are required'}, status=400)
+			fields.extend(
+				[
+					AutofillField(
+						name='username',
+						value=username,
+						field_type='username',
+						aliases=['email', 'login', 'account', '账号', '用户名'],
+					),
+					AutofillField(
+						name='password',
+						value=password,
+						field_type='password',
+						aliases=['password', 'pwd', '密码'],
+					),
+				]
+			)
+		else:
+			phone = str(payload.get('phone') or '').strip()
+			if not phone:
+				return _cors_response({'error': 'phone is required'}, status=400)
+			fields.append(
+				AutofillField(
+					name='phone',
+					value=phone,
+					field_type='phone',
+					aliases=['phone', 'mobile', 'tel', '手机号', '手机'],
+				)
+			)
+
+		try:
+			profile = self.credential_store.add_profile(label=label, url=url, fields=fields)
+			preview = self.credential_store.preview_matches(url)
+		except Exception as exc:
+			return _cors_response({'error': str(exc)}, status=500)
+		return _cors_response({'profile': profile.model_dump(mode='json'), 'matches': preview}, status=201)
+
 	def _resolve_cdp_url(self, requested_cdp_url: str | None = None) -> str | None:
 		if requested_cdp_url:
 			return requested_cdp_url
@@ -160,28 +290,136 @@ class SidePanelServer:
 			self._discovered_cdp_url = None
 		return self._discovered_cdp_url
 
-	async def assistant(self, request: web.Request) -> web.Response:
-		try:
-			payload = await request.json()
-		except json.JSONDecodeError:
-			return _cors_response({'error': 'Invalid JSON body'}, status=400)
+	async def _run_browser_agent(
+		self,
+		task: str,
+		payload: dict[str, Any],
+		cdp_url: str | None,
+		use_vision: bool,
+	) -> dict[str, Any]:
+		from browser_use.agent.service import Agent
+		from browser_use.assistant.research import resolve_llm
 
+		llm = resolve_llm(str(payload.get('model') or self.config.model or '') or None)
+		fallback_model = str(payload.get('fallback_model') or self.config.fallback_model or '') or None
+		fallback_llm = resolve_llm(fallback_model) if fallback_model else None
+		browser_kwargs: dict[str, Any] = {'enable_default_extensions': True}
+		if cdp_url:
+			browser_kwargs['cdp_url'] = cdp_url
+		else:
+			browser_kwargs['headless'] = False
+		browser = BrowserSession(**browser_kwargs)
+		page_context = payload.get('page_context') if isinstance(payload.get('page_context'), dict) else None
+		page_url = str((page_context or {}).get('url') or (page_context or {}).get('browserUrl') or '').strip()
+		initial_actions = []
+		if page_url.lower().startswith(('http://', 'https://')):
+			initial_actions.append({'navigate': {'url': page_url, 'new_tab': False}})
+		agent_task = (
+			task
+			+ _page_context_prompt(page_context)
+			+ '\n\nOperate dynamically rather than following a fixed research pipeline. First decide whether the supplied current page context is enough to answer. '
+			'When current page context is supplied, treat it as the starting point and use it before opening unrelated pages. '
+			'If deeper information is needed, browse from the current page or its relevant links. Avoid repeating blocked sources, and adapt when a site needs login, verification, or is empty. '
+			'For recommendation tasks, gather enough concrete evidence to answer, then stop; do not visit sources just because they are part of a preset sequence.'
+		)
+		agent = Agent(
+			task=agent_task,
+			llm=llm,
+			fallback_llm=fallback_llm,
+			browser=browser,
+			initial_actions=initial_actions,
+			accounts_file=self.config.accounts_file or os.getenv('BROWSER_USE_ACCOUNTS_FILE'),
+			use_vision='auto' if use_vision else False,
+			llm_timeout=int(payload.get('llm_timeout') or self.config.llm_timeout),
+			max_actions_per_step=3,
+		)
+		history = await agent.run(max_steps=int(payload.get('max_steps') or self.config.max_steps))
+		return {
+			'result': history.final_result() if history else '',
+			'mode': 'agent',
+			'is_done': history.is_done() if history else False,
+			'is_successful': history.is_successful() if history else None,
+			'visited_urls': history.urls() if history else [],
+			'action_names': history.action_names() if history else [],
+			'errors': [error for error in (history.errors() if history else []) if error],
+			'cdp_url': cdp_url,
+		}
+
+	async def _run_page_context_analysis(self, task: str, payload: dict[str, Any]) -> dict[str, Any]:
+		page_context = payload.get('page_context') if isinstance(payload.get('page_context'), dict) else {}
+		llm = resolve_llm(str(payload.get('model') or self.config.model or '') or None)
+		title = str(page_context.get('title') or page_context.get('browserTitle') or '').strip()
+		url = str(page_context.get('url') or page_context.get('browserUrl') or '').strip()
+		text = str(page_context.get('text') or '').strip()
+		links = page_context.get('links') if isinstance(page_context.get('links'), list) else []
+		link_lines: list[str] = []
+		for item in links[:80]:
+			if not isinstance(item, dict):
+				continue
+			label = str(item.get('text') or '').strip()
+			href = str(item.get('href') or '').strip()
+			if label or href:
+				link_lines.append(f'- {label or href} | {href}')
+		messages = [
+			SystemMessage(
+				content=(
+					'You answer from the current page context captured by a browser side panel. Do not open or navigate pages. '
+					'Only claim what is visible in the captured title, URL, text, and links. If a linked file or directory is not included in the captured text, do not pretend you read it. '
+					'If the page context is sparse, say what is missing and infer only cautiously. '
+					'For repository or code-framework questions, explain the visible project structure, likely modules, entry points, and concrete next files to inspect, grounded in the captured page content.'
+				)
+			),
+			UserMessage(
+				content=(
+					f'User task:\n{task}\n\n'
+					f'Current page title: {title or "unknown"}\n'
+					f'Current page URL: {url or "unknown"}\n\n'
+					'Visible page text excerpt:\n'
+					f'{text[:24000] or "empty"}\n\n'
+					'Visible links:\n'
+					+ ('\n'.join(link_lines) if link_lines else 'none')
+				)
+			),
+		]
+		response = await llm.ainvoke(messages)
+		result = (response.completion or '').strip()
+		if not result:
+			result = '当前页面上下文为空或模型未返回内容，无法基于页面进行讲解。'
+		return {
+			'result': result,
+			'mode': 'page_context',
+			'is_done': True,
+			'is_successful': True,
+			'visited_urls': [url] if url else [],
+			'action_names': [],
+			'errors': [],
+			'cdp_url': None,
+		}
+
+	async def _run_assistant_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
 		task = str(payload.get('task') or '').strip()
 		if not task:
-			return _cors_response({'error': 'task is required'}, status=400)
+			raise ValueError('task is required')
 
 		page_context = payload.get('page_context')
 		if page_context is not None and not isinstance(page_context, dict):
-			return _cors_response({'error': 'page_context must be an object'}, status=400)
+			raise ValueError('page_context must be an object')
 
 		requested_cdp_url = str(payload.get('cdp_url') or '').strip() or None
 		cdp_url = self._resolve_cdp_url(requested_cdp_url)
-		enriched_task = task + _page_context_prompt(page_context)
 
 		# Determine use_vision: prefer request payload, then server config
 		use_vision = payload.get('use_vision')
 		if use_vision is None:
 			use_vision = self.config.use_vision
+
+		if _is_page_context_analysis_task(task, page_context):
+			return await self._run_page_context_analysis(task, payload)
+
+		if not _should_use_research_assistant(task, payload):
+			return await self._run_browser_agent(task, payload, cdp_url, bool(use_vision))
+
+		enriched_task = task + _page_context_prompt(page_context)
 
 		config = ResearchAssistantConfig(
 			task=enriched_task,
@@ -202,21 +440,16 @@ class SidePanelServer:
 			assistant = BrowserResearchAssistant(config)
 			if bool(payload.get('dry_run', False)):
 				task_plan = await assistant._analyze_task()
-				return _cors_response(
-					{
-						'result': 'dry_run',
-						'task_plan': task_plan.model_dump(mode='json'),
-						'stage_results': [],
-						'candidate_catalog': [],
-						'cdp_url': cdp_url,
-					}
-				)
+				return {
+					'result': 'dry_run',
+					'task_plan': task_plan.model_dump(mode='json'),
+					'stage_results': [],
+					'candidate_catalog': [],
+					'cdp_url': cdp_url,
+				}
 			artifacts = await assistant.run(cdp_url=cdp_url)
-		except Exception as exc:
-			return _cors_response({'error': str(exc)}, status=500)
 
-		return _cors_response(
-			{
+			return {
 				'result': render_report(artifacts.report),
 				'report': artifacts.report.model_dump(mode='json'),
 				'task_plan': artifacts.task_plan.model_dump(mode='json'),
@@ -224,7 +457,57 @@ class SidePanelServer:
 				'candidate_catalog': [candidate.model_dump(mode='json') for candidate in artifacts.candidate_catalog],
 				'cdp_url': cdp_url,
 			}
-		)
+		except Exception as exc:
+			raise RuntimeError(str(exc)) from exc
+
+	async def assistant(self, request: web.Request) -> web.Response:
+		try:
+			payload = await request.json()
+			return _cors_response(await self._run_assistant_payload(payload))
+		except json.JSONDecodeError:
+			return _cors_response({'error': 'Invalid JSON body'}, status=400)
+		except ValueError as exc:
+			return _cors_response({'error': str(exc)}, status=400)
+		except Exception as exc:
+			return _cors_response({'error': str(exc)}, status=500)
+
+	async def assistant_start(self, request: web.Request) -> web.Response:
+		try:
+			payload = await request.json()
+		except json.JSONDecodeError:
+			return _cors_response({'error': 'Invalid JSON body'}, status=400)
+
+		task = str(payload.get('task') or '').strip()
+		if not task:
+			return _cors_response({'error': 'task is required'}, status=400)
+
+		job_id = uuid.uuid4().hex
+		self.jobs[job_id] = {
+			'id': job_id,
+			'status': 'running',
+			'created_at': time.time(),
+			'updated_at': time.time(),
+			'task': task,
+			'result': None,
+			'error': None,
+		}
+		asyncio.create_task(self._run_job(job_id, payload))
+		return _cors_response({'job_id': job_id, 'status': 'running'}, status=202)
+
+	async def _run_job(self, job_id: str, payload: dict[str, Any]) -> None:
+		job = self.jobs[job_id]
+		try:
+			result = await self._run_assistant_payload(payload)
+			job.update({'status': 'completed', 'result': result, 'error': None, 'updated_at': time.time()})
+		except Exception as exc:
+			job.update({'status': 'failed', 'result': None, 'error': str(exc), 'updated_at': time.time()})
+
+	async def assistant_status(self, request: web.Request) -> web.Response:
+		job_id = request.match_info.get('job_id', '')
+		job = self.jobs.get(job_id)
+		if not job:
+			return _cors_response({'error': 'job not found'}, status=404)
+		return _cors_response(job)
 
 
 def create_app(config: SidePanelServerConfig) -> web.Application:
@@ -234,10 +517,16 @@ def create_app(config: SidePanelServerConfig) -> web.Application:
 	app.router.add_options('/health', server.options)
 	app.router.add_post('/assistant', server.assistant)
 	app.router.add_options('/assistant', server.options)
+	app.router.add_post('/assistant/start', server.assistant_start)
+	app.router.add_options('/assistant/start', server.options)
+	app.router.add_get('/assistant/status/{job_id}', server.assistant_status)
+	app.router.add_options('/assistant/status/{job_id}', server.options)
 	app.router.add_post('/autofill/preview', server.autofill_preview)
 	app.router.add_options('/autofill/preview', server.options)
 	app.router.add_post('/autofill/resolve', server.autofill_resolve)
 	app.router.add_options('/autofill/resolve', server.options)
+	app.router.add_post('/autofill/create', server.autofill_create)
+	app.router.add_options('/autofill/create', server.options)
 	return app
 
 
@@ -252,8 +541,7 @@ async def run_server(config: SidePanelServerConfig) -> None:
 	print(f'Browser Use side-panel bridge listening on http://{config.host}:{config.port}', flush=True)
 	print(f'Autofill profile store: {store_path}', flush=True)
 	try:
-		while True:
-			await asyncio.sleep(3600)
+		await asyncio.Event().wait()
 	finally:
 		await runner.cleanup()
 

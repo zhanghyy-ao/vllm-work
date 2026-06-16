@@ -12,8 +12,8 @@ from urllib.parse import quote_plus, urljoin, urlparse
 import httpx
 from pydantic import BaseModel, Field
 
-from browser_use import Agent, Browser, ChatBrowserUse, ChatOpenAI
-from browser_use.agent.views import AgentHistoryList
+from browser_use import Agent, Browser, ChatOpenAI, Tools
+from browser_use.agent.views import ActionResult, AgentHistoryList
 from browser_use.llm.base import BaseChatModel
 from browser_use.llm.messages import SystemMessage, UserMessage
 from browser_use.llm.models import get_llm_by_name
@@ -221,6 +221,38 @@ class ResolvedStageTargets(BaseModel):
 
 def _contains_cjk(text: str) -> bool:
 	return bool(re.search(r'[\u3400-\u9fff]', text))
+
+
+_HUMAN_AUTH_MARKERS = (
+	'login',
+	'log in',
+	'sign in',
+	'sign-in',
+	'verification',
+	'verify',
+	'captcha',
+	'slider',
+	'sms',
+	'one-time code',
+	'otp',
+	'登录',
+	'登陆',
+	'请重新登录',
+	'验证',
+	'验证码',
+	'滑块',
+	'拖动',
+	'扫码登录',
+	'账号名',
+	'手机号',
+	'请输入登录密码',
+	'前往登录',
+)
+
+
+def _looks_like_human_auth_page(text: str) -> bool:
+	normalized = text.lower()
+	return any(marker in normalized for marker in _HUMAN_AUTH_MARKERS)
 
 
 def _normalize_site(site: str) -> str:
@@ -2787,19 +2819,16 @@ def resolve_llm(model_name: str | None = None) -> BaseChatModel:
 			return get_llm_by_name(explicit)
 		if os.getenv('OPENAI_API_KEY') or os.getenv('OPENAI_BASE_URL'):
 			return ChatOpenAI(model=explicit, api_key=os.getenv('OPENAI_API_KEY'), base_url=os.getenv('OPENAI_BASE_URL') or None)
-		if os.getenv('BROWSER_USE_API_KEY'):
-			return ChatBrowserUse(model=explicit, api_key=os.getenv('BROWSER_USE_API_KEY'))
 
 	if raw_model and (os.getenv('OPENAI_API_KEY') or os.getenv('OPENAI_BASE_URL')):
 		return ChatOpenAI(model=raw_model, api_key=os.getenv('OPENAI_API_KEY'), base_url=os.getenv('OPENAI_BASE_URL') or None)
 
-	if os.getenv('BROWSER_USE_API_KEY'):
-		return ChatBrowserUse(model='bu-2-0', api_key=os.getenv('BROWSER_USE_API_KEY'))
+	if os.getenv('OPENAI_API_KEY'):
+		return ChatOpenAI(model='gpt-5-mini', api_key=os.getenv('OPENAI_API_KEY'), base_url=os.getenv('OPENAI_BASE_URL') or None)
 
 	raise ValueError(
 		'No supported LLM configuration found. Set DEFAULT_LLM=openai_gpt_5_4, '
-		'or set BROWSER_USE_LLM_MODEL plus OPENAI_API_KEY/OPENAI_BASE_URL, '
-		'or configure BROWSER_USE_API_KEY for ChatBrowserUse.'
+		'or set BROWSER_USE_LLM_MODEL plus OPENAI_API_KEY/OPENAI_BASE_URL.'
 	)
 
 
@@ -2826,7 +2855,11 @@ def build_stage_prompt(
 
 Dynamic-page guidance:
 - Use the rendered browser page as the source of truth, including visible cards, text, prices, and links.
-- If a verification page, login wall, empty skeleton, or risk-control page is visible, record that under Failed Sources.
+- If a verification page, login wall, SMS-code prompt, QR login, slider, or risk-control page is visible, keep the visible
+  browser on that page and use the wait_for_human_login_or_verification action. After the human completes the login or
+  verification, re-check the current page and continue extraction.
+- Do not mark a source failed just because login or verification is required unless the human wait times out or the page
+  remains blocked after the user confirms.
 - If the page becomes usable after normal rendering or existing user session state, extract from what is visible; do not rely on initial HTML.
 """.rstrip()
 
@@ -2859,10 +2892,13 @@ Execution rules:
 1. The initial tabs should already be on site-specific search or result pages. Start extracting from the opened tabs first.
 2. If the current tab is broken, blocked, or empty, switch to another already-opened source tab before trying anything else.
 3. Stay inside the provided source domains only. Do not use generic web search engines or navigate to unrelated domains unless this is already the dedicated web stage.
-4. If the current source domain is unavailable or blocked, record that under Failed Sources and finish the stage instead of searching elsewhere.
+4. If the current source domain is unavailable, broken, or blocked for a reason that is not login/verification, record that under Failed Sources and finish the stage instead of searching elsewhere.
 5. Extract exact names, URLs, and concrete evidence when available.
 6. Do not invent products, prices, ratings, quotes, or claims.
 7. Keep at most {max_recommendations + 2} plausible candidates or key findings across this stage.
+8. For login, SMS code, QR code, slider verification, CAPTCHA, or other anti-bot checks: navigate to or stay on the
+   visible login/verification page, call wait_for_human_login_or_verification, and wait for the human to finish before
+   deciding the source is unavailable.
 {observation_rule}
 
 Return markdown with these sections only:
@@ -4123,15 +4159,56 @@ class BrowserResearchAssistant:
 				'cdp_url': cdp_url,
 				'allowed_domains': sorted(domain for domain in allowed_domains if domain),
 				'enable_default_extensions': False,
+				'keep_alive': True,
 			}
 			if cdp_url is None:
-				browser_kwargs['headless'] = True
+				browser_kwargs['headless'] = False
 			browser = Browser(**browser_kwargs)
+			tools = Tools()
+
+			@tools.action(
+				'Wait for the human tester to complete login, SMS code, QR login, slider verification, CAPTCHA, or any '
+				'other anti-bot check in the visible browser. Use this whenever the current page asks for login or '
+				'verification. Keep the browser on the login/verification page before calling this action.'
+			)
+			async def wait_for_human_login_or_verification(message: str = 'Please complete login or verification in the visible browser.'):
+				timeout_seconds = 300
+				poll_seconds = 2
+				print('\n' + '=' * 72, flush=True)
+				print('Human action needed in the visible browser', flush=True)
+				print(message, flush=True)
+				print('I will keep checking the page and continue automatically after it no longer looks blocked.', flush=True)
+				print('=' * 72 + '\n', flush=True)
+				last_url = ''
+				last_title = ''
+				for _ in range(timeout_seconds // poll_seconds):
+					await asyncio.sleep(poll_seconds)
+					try:
+						state = await browser.get_browser_state_summary(include_screenshot=False)
+						page_text = state.dom_state.llm_representation(max_text_length=120)
+						last_url = state.url
+						last_title = state.title
+						combined = f'{state.url}\n{state.title}\n{page_text}'
+						if not _looks_like_human_auth_page(combined):
+							memory = f'Human login/verification appears complete. Current page: {state.title} {state.url}'
+							print(memory, flush=True)
+							return ActionResult(extracted_content=memory, long_term_memory=memory)
+					except Exception as exc:
+						last_title = type(exc).__name__
+						last_url = str(exc)
+				memory = (
+					'Timed out waiting for human login/verification after '
+					f'{timeout_seconds}s. Last observed page: {last_title} {last_url}'
+				)
+				print(memory, flush=True)
+				return ActionResult(extracted_content=memory, long_term_memory=memory)
+
 			agent = Agent(
 				task=prompt,
 				llm=self.llm,
 				fallback_llm=self.fallback_llm,
 				browser=browser,
+				tools=tools,
 				initial_actions=initial_actions,
 				use_vision=_stage_use_vision(self.config, source_type, sources),
 				use_thinking=False,

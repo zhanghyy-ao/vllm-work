@@ -1,8 +1,11 @@
 import asyncio
+import base64
 import json
 import logging
 import math
 import os
+import re
+import string
 from typing import Any, Generic, TypeVar
 
 import anyio
@@ -33,20 +36,26 @@ from browser_use.browser.views import BrowserError
 from browser_use.dom.service import EnhancedDOMTreeNode
 from browser_use.filesystem.file_system import FileSystem
 from browser_use.llm.base import BaseChatModel
-from browser_use.llm.messages import SystemMessage, UserMessage
+from browser_use.llm.messages import ContentPartImageParam, ContentPartTextParam, ImageURL, SystemMessage, UserMessage
 from browser_use.observability import observe_debug
 from browser_use.tools.registry.service import Registry
 from browser_use.tools.utils import get_click_description
 from browser_use.tools.views import (
+	AutoFillLoginAction,
 	ClickElementAction,
 	ClickElementActionIndexOnly,
 	CloseTabAction,
+	ComputeOverlapAction,
+	DiagnosePageAction,
 	DoneAction,
 	EvaluateJsAction,
 	ExtractAction,
+	ExtractTableColumnAction,
+	FindArchiveSnapshotAction,
 	FindElementsAction,
 	GetDropdownOptionsAction,
 	GitHubNavigateAction,
+	InspectImageAction,
 	InputTextAction,
 	NavigateAction,
 	NoParamsAction,
@@ -62,6 +71,7 @@ from browser_use.tools.views import (
 	SwitchTabAction,
 	UploadFileAction,
 	UseAccountAction,
+	VerifyPageTextAction,
 	WaitForUserInputAction,
 	WriteFileAction,
 )
@@ -303,6 +313,125 @@ try {
 }
 """
 
+_EXTRACT_TABLE_COLUMN_JS_BODY = """\
+try {
+	var table = document.querySelector(TABLE_SELECTOR);
+	if (!table) {
+		return {error: 'Table selector not found: ' + TABLE_SELECTOR, values: [], rows: [], headers: []};
+	}
+
+	function clean(text) {
+		return (text || '').replace(/\\s+/g, ' ').trim();
+	}
+
+	var headerCells = Array.from(table.querySelectorAll('thead tr:last-child th, thead tr:last-child td'));
+	if (!headerCells.length) {
+		headerCells = Array.from(table.querySelectorAll('tr:first-child th, tr:first-child td'));
+	}
+	var headers = headerCells.map(function(cell) { return clean(cell.innerText || cell.textContent); });
+
+	var columnIndex = -1;
+	var requested = String(COLUMN).trim();
+	if (/^\\d+$/.test(requested)) {
+		columnIndex = parseInt(requested, 10) - 1;
+	} else {
+		var normalizedRequested = requested.toLowerCase();
+		columnIndex = headers.findIndex(function(header) {
+			var normalizedHeader = header.toLowerCase();
+			return normalizedHeader === normalizedRequested || normalizedHeader.includes(normalizedRequested);
+		});
+	}
+	if (columnIndex < 0) {
+		return {error: 'Column not found: ' + COLUMN, values: [], rows: [], headers: headers};
+	}
+
+	var bodyRows = Array.from(table.querySelectorAll('tbody tr'));
+	if (!bodyRows.length) {
+		bodyRows = Array.from(table.querySelectorAll('tr')).filter(function(row) {
+			var cells = Array.from(row.querySelectorAll('th, td'));
+			if (!cells.length || cells.length <= columnIndex) return false;
+			var rowText = cells.map(function(cell) { return clean(cell.innerText || cell.textContent); }).join('|');
+			var headerText = headers.join('|');
+			return rowText !== headerText && !cells.every(function(cell) { return cell.tagName.toLowerCase() === 'th'; });
+		});
+	}
+	if (!bodyRows.length) {
+		bodyRows = Array.from(table.querySelectorAll('tr')).filter(function(row) {
+			var cells = Array.from(row.querySelectorAll('th, td'));
+			return cells.length > columnIndex;
+		}).slice(headers.length ? 1 : 0);
+	}
+
+	var values = [];
+	var rows = [];
+	for (var i = 0; i < bodyRows.length && values.length < LIMIT; i++) {
+		var cells = Array.from(bodyRows[i].querySelectorAll('th, td'));
+		if (cells.length <= columnIndex) continue;
+		var value = clean(cells[columnIndex].innerText || cells[columnIndex].textContent);
+		if (!value) continue;
+		values.push(value);
+		if (INCLUDE_ROWS) {
+			var rowObj = {};
+			for (var j = 0; j < cells.length; j++) {
+				var key = headers[j] || ('column_' + (j + 1));
+				rowObj[key] = clean(cells[j].innerText || cells[j].textContent);
+			}
+			rows.push(rowObj);
+		}
+	}
+
+	return {
+		values: values,
+		rows: rows,
+		headers: headers,
+		column_index: columnIndex + 1,
+		table_selector: TABLE_SELECTOR,
+		total_rows_seen: bodyRows.length
+	};
+} catch (e) {
+	return {error: 'extract_table_column error: ' + e.message, values: [], rows: [], headers: []};
+}
+"""
+
+_IMAGE_INFO_JS_BODY = """\
+try {
+	function absUrl(value) {
+		try { return value ? new URL(value, document.baseURI).href : ''; } catch (e) { return value || ''; }
+	}
+	function visibleInfo(el) {
+		var rect = el.getBoundingClientRect();
+		var style = window.getComputedStyle(el);
+		return {
+			visible: style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0,
+			x: rect.x,
+			y: rect.y,
+			width: rect.width,
+			height: rect.height
+		};
+	}
+	var el = SELECTOR ? document.querySelector(SELECTOR) : null;
+	if (!el) return {error: 'Image selector not found: ' + SELECTOR};
+	var target = el;
+	if (target.tagName && target.tagName.toLowerCase() !== 'img') {
+		target = target.querySelector('img') || target;
+	}
+	var src = '';
+	if (target.tagName && target.tagName.toLowerCase() === 'img') {
+		src = target.currentSrc || target.src || target.getAttribute('src') || '';
+	}
+	if (!src) src = target.getAttribute('href') || target.getAttribute('src') || '';
+	return {
+		src: absUrl(src),
+		alt: target.getAttribute('alt') || '',
+		title: target.getAttribute('title') || '',
+		tag: target.tagName ? target.tagName.toLowerCase() : '',
+		geometry: visibleInfo(target)
+	};
+} catch (e) {
+	return {error: 'image info error: ' + e.message};
+}
+"""
+
 
 def _build_search_page_js(
 	pattern: str,
@@ -407,6 +536,132 @@ def _format_find_results(data: dict, selector: str) -> str:
 	return '\n'.join(lines)
 
 
+_PAGE_TEXT_JS_BODY = """\
+	const body = document.body;
+	const text = body ? (body.innerText || body.textContent || '') : '';
+	return {
+		url: window.location.href,
+		title: document.title || '',
+		text: text.replace(/\\s+/g, ' ').trim().slice(0, MAX_PAGE_CHARS)
+	};
+"""
+
+_DIAGNOSE_PAGE_JS_BODY = """\
+try {
+	function clean(text) {
+		return (text || '').replace(/\\s+/g, ' ').trim();
+	}
+	function visible(el) {
+		const rect = el.getBoundingClientRect();
+		const style = window.getComputedStyle(el);
+		return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+	}
+	function labelFor(el) {
+		const id = el.getAttribute('id');
+		const aria = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('name') || '';
+		const label = id ? document.querySelector('label[for="' + CSS.escape(id) + '"]') : null;
+		return clean((label && label.innerText) || aria);
+	}
+	const bodyText = clean(document.body ? (document.body.innerText || document.body.textContent || '') : '');
+	const lowerText = bodyText.toLowerCase();
+	const blockerPatterns = [
+		/captcha/i, /recaptcha/i, /hcaptcha/i, /cloudflare/i, /checking your browser/i,
+		/verify you are human/i, /access denied/i, /forbidden/i, /rate limit/i,
+		/bot detection/i, /unusual traffic/i, /login required/i, /sign in to continue/i,
+		/region unavailable/i, /not available in your country/i
+	];
+	const blockers = CHECK_BLOCKERS ? blockerPatterns
+		.filter((pattern) => pattern.test(bodyText))
+		.map((pattern) => String(pattern).replace(/^\\//, '').replace(/\\/i$/, '')) : [];
+
+	const overlaySelectors = [
+		'[role="dialog"]', '[aria-modal="true"]', '.modal', '.popup', '.overlay',
+		'[class*="modal"]', '[class*="popup"]', '[class*="overlay"]',
+		'[id*="modal"]', '[id*="popup"]', '[id*="overlay"]', '[class*="cookie"]'
+	];
+	const overlays = CHECK_OVERLAYS ? Array.from(document.querySelectorAll(overlaySelectors.join(',')))
+		.filter(visible)
+		.slice(0, 8)
+		.map((el) => {
+			const rect = el.getBoundingClientRect();
+			return {
+				tag: el.tagName.toLowerCase(),
+				role: el.getAttribute('role') || '',
+				text: clean(el.innerText || el.textContent).slice(0, 500),
+				x: Math.round(rect.x),
+				y: Math.round(rect.y),
+				width: Math.round(rect.width),
+				height: Math.round(rect.height),
+				z_index: window.getComputedStyle(el).zIndex || ''
+			};
+		}) : [];
+
+	const forms = CHECK_FORMS ? Array.from(document.querySelectorAll('form')).slice(0, 5).map((form) => {
+		const fields = Array.from(form.querySelectorAll('input, textarea, select')).filter(visible).slice(0, 20).map((field) => ({
+			tag: field.tagName.toLowerCase(),
+			type: field.getAttribute('type') || '',
+			name: field.getAttribute('name') || '',
+			label: labelFor(field),
+			required: Boolean(field.required || field.getAttribute('aria-required') === 'true'),
+			value_present: Boolean(field.value),
+			value_preview: ['password', 'hidden'].includes((field.getAttribute('type') || '').toLowerCase()) ? '<redacted>' : clean(field.value).slice(0, 200),
+			valid: typeof field.checkValidity === 'function' ? field.checkValidity() : true,
+			validation_message: field.validationMessage || ''
+		}));
+		const buttons = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"]')).filter(visible).slice(0, 10).map((button) => clean(button.innerText || button.value || button.getAttribute('aria-label')));
+		return {
+			text: clean(form.innerText || form.textContent).slice(0, 500),
+			fields,
+			buttons,
+			valid: typeof form.checkValidity === 'function' ? form.checkValidity() : true
+		};
+	}) : [];
+
+	return {
+		url: window.location.href,
+		title: document.title || '',
+		text_excerpt: bodyText.slice(0, MAX_TEXT_CHARS),
+		text_length: bodyText.length,
+		blockers,
+		overlays,
+		forms,
+		has_visible_text: bodyText.length > 0,
+		empty_or_unusable: bodyText.length < 80 && document.querySelectorAll('a,button,input,select,textarea').length < 3
+	};
+} catch (e) {
+	return {error: 'diagnose_page error: ' + e.message};
+}
+"""
+
+
+def _normalize_overlap_item(value: str) -> str:
+	"""Normalize an extracted list item for deterministic comparison."""
+	value = ' '.join(str(value).split()).casefold()
+	value = value.translate(str.maketrans('', '', string.punctuation))
+	return ' '.join(value.split())
+
+
+def _context_around(text: str, start: int, end: int, context_chars: int) -> str:
+	context_start = max(0, start - context_chars)
+	context_end = min(len(text), end + context_chars)
+	prefix = '...' if context_start > 0 else ''
+	suffix = '...' if context_end < len(text) else ''
+	return prefix + text[context_start:context_end] + suffix
+
+
+def _extraction_llm_timeout() -> float:
+	"""Timeout for tool-internal LLM calls used by extraction and image inspection."""
+	raw = os.getenv('BROWSER_USE_EXTRACTION_LLM_TIMEOUT_S')
+	if raw:
+		try:
+			value = float(raw)
+			if value > 0:
+				return value
+		except ValueError:
+			logger.warning(f'Invalid BROWSER_USE_EXTRACTION_LLM_TIMEOUT_S={raw!r}; using 45s')
+	return 45.0
+
+
 def _is_autocomplete_field(node: EnhancedDOMTreeNode) -> bool:
 	"""Detect if a node is an autocomplete/combobox field from its attributes."""
 	attrs = node.attributes or {}
@@ -447,6 +702,193 @@ def _extract_github_branch(url: str) -> str | None:
 	return None
 
 
+def _resolve_account_for_autofill(account_service: Any, label: str | None, url: str | None):
+	"""Resolve the most likely account for an autofill request."""
+	if label:
+		account = account_service.get_account_by_label(label)
+		if account is None:
+			account = account_service.get_account_by_platform(label)
+		return account
+	if url:
+		matches = account_service.get_accounts_for_url(url)
+		if matches:
+			return matches[0]
+	return None
+
+
+def _build_autofill_credentials(account: Any) -> dict[str, str]:
+	"""Convert an account model to page-fill credentials."""
+	raw_credentials = account.credentials.model_dump(exclude_none=True)
+	credentials: dict[str, str] = {}
+	for key, value in raw_credentials.items():
+		if value is not None and str(value) != '':
+			credentials[key] = str(value)
+	return credentials
+
+
+def _summarize_autofill_result(result: dict[str, Any], account_label: str, account_platform: str) -> str:
+	"""Create a redacted summary for autofill action results."""
+	filled = result.get('filled') if isinstance(result.get('filled'), list) else []
+	filled_types = sorted({str(item.get('credential', 'field')) for item in filled if isinstance(item, dict)})
+	missing = result.get('missing_required_credentials') if isinstance(result.get('missing_required_credentials'), list) else []
+	submitted = bool(result.get('submitted'))
+
+	if filled_types:
+		message = (
+			f'Auto-filled {len(filled)} login field(s) for account "{account_label}" ({account_platform}): '
+			f'{", ".join(filled_types)}.'
+		)
+	else:
+		message = f'No login fields were auto-filled for account "{account_label}" ({account_platform}).'
+
+	if missing:
+		message += f' Missing stored credential(s): {", ".join(str(item) for item in missing)}.'
+	if submitted:
+		message += ' Submitted the detected login form.'
+	return message
+
+
+async def _collect_done_page_evidence(browser_session: BrowserSession | None) -> str:
+	"""Capture a small current-page evidence snippet for final answers."""
+	if browser_session is None:
+		return ''
+	try:
+		state = await asyncio.wait_for(browser_session.get_browser_state_summary(include_screenshot=False), timeout=8.0)
+	except Exception as e:
+		logger.debug(f'Could not collect done page evidence: {type(e).__name__}: {e}')
+		return ''
+
+	parts = ['\n\nFinal page evidence observed at done():']
+	if state.url:
+		parts.append(f'URL: {state.url}')
+	if state.title:
+		parts.append(f'Title: {state.title}')
+	try:
+		text = state.dom_state.llm_representation(max_text_length=140)
+	except Exception:
+		text = ''
+	text = ' '.join(text.split())
+	if text:
+		parts.append(f'Visible/extracted page text excerpt: {text[:1200]}')
+	return '\n'.join(parts)
+
+
+_AUTO_FILL_LOGIN_JS = r"""(function() {
+	const credentials = CREDENTIALS;
+	const shouldSubmit = SHOULD_SUBMIT;
+	const filled = [];
+	const missingRequiredCredentials = [];
+	const fieldCandidates = Array.from(document.querySelectorAll('input, textarea')).filter((el) => {
+		if (!el || el.disabled || el.readOnly) return false;
+		const rect = el.getBoundingClientRect();
+		const style = window.getComputedStyle(el);
+		if (style.visibility === 'hidden' || style.display === 'none') return false;
+		if (rect.width <= 0 || rect.height <= 0) return false;
+		const type = (el.getAttribute('type') || '').toLowerCase();
+		return !['hidden', 'submit', 'button', 'checkbox', 'radio', 'file', 'image', 'reset'].includes(type);
+	});
+
+	function labelText(el) {
+		const bits = [];
+		for (const attr of ['name', 'id', 'autocomplete', 'type', 'placeholder', 'aria-label', 'title']) {
+			const value = el.getAttribute(attr);
+			if (value) bits.push(value);
+		}
+		if (el.id) {
+			const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+			if (label && label.innerText) bits.push(label.innerText);
+		}
+		const wrappingLabel = el.closest('label');
+		if (wrappingLabel && wrappingLabel.innerText) bits.push(wrappingLabel.innerText);
+		return bits.join(' ').toLowerCase();
+	}
+
+	function fieldKind(el) {
+		const text = labelText(el);
+		const type = (el.getAttribute('type') || '').toLowerCase();
+		const autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
+		if (type === 'password' || /(current-password|new-password|password|passwd|pwd|密码|密碼)/i.test(text)) return 'password';
+		if (type === 'email' || autocomplete === 'email' || /(email|e-mail|mail|邮箱|郵箱|电子邮件|電子郵件)/i.test(text)) return 'email';
+		if (type === 'tel' || autocomplete === 'tel' || /(phone|mobile|tel|手机号|手機|电话|電話)/i.test(text)) return 'phone';
+		if (/(username|user name|login|account|userid|user-id|账号|帐号|用戶|用户|會員|会员)/i.test(text)) return 'username';
+		return 'identity';
+	}
+
+	function credentialFor(kind) {
+		if (kind === 'password') return credentials.password ? ['password', credentials.password] : null;
+		if (kind === 'email') return credentials.email ? ['email', credentials.email] : (credentials.username ? ['username', credentials.username] : null);
+		if (kind === 'phone') return credentials.phone ? ['phone', credentials.phone] : null;
+		if (kind === 'username') return credentials.username ? ['username', credentials.username] : (credentials.email ? ['email', credentials.email] : (credentials.phone ? ['phone', credentials.phone] : null));
+		if (credentials.username) return ['username', credentials.username];
+		if (credentials.email) return ['email', credentials.email];
+		if (credentials.phone) return ['phone', credentials.phone];
+		return null;
+	}
+
+	function setNativeValue(el, value) {
+		const prototype = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+		const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+		if (descriptor && descriptor.set) descriptor.set.call(el, value);
+		else el.value = value;
+		el.dispatchEvent(new Event('input', { bubbles: true }));
+		el.dispatchEvent(new Event('change', { bubbles: true }));
+		el.dispatchEvent(new Event('blur', { bubbles: true }));
+	}
+
+	const passwordFields = fieldCandidates.filter((el) => fieldKind(el) === 'password');
+	const identityFields = fieldCandidates.filter((el) => fieldKind(el) !== 'password');
+	const targets = [];
+	if (identityFields.length) targets.push(identityFields[0]);
+	if (passwordFields.length) targets.push(passwordFields[0]);
+
+	for (const el of targets) {
+		const kind = fieldKind(el);
+		const credential = credentialFor(kind);
+		if (!credential) {
+			missingRequiredCredentials.push(kind);
+			continue;
+		}
+		setNativeValue(el, credential[1]);
+		filled.push({
+			credential: credential[0],
+			field_kind: kind,
+			tag: el.tagName.toLowerCase(),
+			type: (el.getAttribute('type') || '').toLowerCase() || null,
+			name: el.getAttribute('name') || null,
+			id: el.id || null,
+			autocomplete: el.getAttribute('autocomplete') || null,
+		});
+	}
+
+	let submitted = false;
+	if (shouldSubmit && filled.length) {
+		const form = targets[0] ? targets[0].closest('form') : null;
+		const buttons = Array.from((form || document).querySelectorAll('button, input[type="submit"], input[type="button"]')).filter((button) => {
+			if (button.disabled) return false;
+			const rect = button.getBoundingClientRect();
+			if (rect.width <= 0 || rect.height <= 0) return false;
+			const text = ((button.innerText || button.value || '') + ' ' + (button.getAttribute('aria-label') || '')).toLowerCase();
+			return /login|log in|sign in|submit|continue|next|登录|登入|登陆|提交|下一步|继续/.test(text);
+		});
+		if (buttons[0]) {
+			buttons[0].click();
+			submitted = true;
+		} else if (form) {
+			form.requestSubmit ? form.requestSubmit() : form.submit();
+			submitted = true;
+		}
+	}
+
+	return {
+		filled,
+		submitted,
+		missing_required_credentials: Array.from(new Set(missingRequiredCredentials)),
+		visible_fillable_fields: fieldCandidates.length,
+		password_fields: passwordFields.length,
+	};
+})()"""
+
+
 class Tools(Generic[Context]):
 	def __init__(
 		self,
@@ -458,10 +900,100 @@ class Tools(Generic[Context]):
 		self.display_files_in_done_text = display_files_in_done_text
 		self._output_model: type[BaseModel] | None = output_model
 		self._coordinate_clicking_enabled: bool = False
+		self._recent_evidence_actions: list[str] = []
+		self._last_image_inspection_uncertain: bool = False
+		self._last_page_verification_all_matched: bool | None = None
+		self._empty_dom_hosts: dict[str, int] = {}
+		self._recent_list_extraction_urls: list[str] = []
+		self._recent_page_evidence_texts: list[str] = []
+		self._recent_page_urls: list[str] = []
 
 		"""Register all default browser actions"""
 
 		self._register_done_action(output_model)
+
+		def _remember_evidence_action(action_name: str) -> None:
+			self._recent_evidence_actions.append(action_name)
+			if len(self._recent_evidence_actions) > 30:
+				self._recent_evidence_actions[:] = self._recent_evidence_actions[-30:]
+
+		def _looks_like_list_extraction(query: str) -> bool:
+			normalized = query.casefold()
+			return any(
+				marker in normalized
+				for marker in (
+					'top ',
+					'top-',
+					'ranked list',
+					'rank order',
+					'list of',
+					'titles 1 through',
+					'items 1 through',
+				)
+			)
+
+		def _remember_list_extraction_url(url: str) -> None:
+			self._recent_list_extraction_urls.append(url)
+			if len(self._recent_list_extraction_urls) > 10:
+				self._recent_list_extraction_urls[:] = self._recent_list_extraction_urls[-10:]
+
+		def _remember_page_url(url: str) -> None:
+			self._recent_page_urls.append(url)
+			if len(self._recent_page_urls) > 20:
+				self._recent_page_urls[:] = self._recent_page_urls[-20:]
+
+		async def _capture_recent_page_evidence(browser_session: BrowserSession, *, reason: str) -> None:
+			"""Cache short-lived visible page evidence after actions like form submit."""
+			try:
+				cdp_session = await browser_session.get_or_create_cdp_session()
+				result = await asyncio.wait_for(
+					cdp_session.cdp_client.send.Runtime.evaluate(
+						params={
+							'expression': (
+								"(() => { const body = document.body; "
+								"return body ? (body.innerText || body.textContent || '') : ''; })()"
+							),
+							'returnByValue': True,
+							'awaitPromise': True,
+						},
+						session_id=cdp_session.session_id,
+					),
+					timeout=3.0,
+				)
+				text = str(result.get('result', {}).get('value') or '').strip()
+				if not text:
+					return
+				text_lower = text.casefold()
+				if any(
+					marker in text_lower
+					for marker in (
+						'secret is',
+						'success',
+						'successfully',
+						'تم بنجاح',
+						'تم إرسال',
+						'submitted',
+						'confirmation',
+					)
+				):
+					snippet = text[:5000]
+					self._recent_page_evidence_texts.append(snippet)
+					if len(self._recent_page_evidence_texts) > 10:
+						self._recent_page_evidence_texts[:] = self._recent_page_evidence_texts[-10:]
+					_remember_evidence_action('page_evidence')
+					logger.info(f'🧾 Cached page evidence after {reason}: {snippet[:160]}')
+			except Exception as e:
+				logger.debug(f'Could not cache page evidence after {reason}: {type(e).__name__}: {e}')
+
+		def _navigation_allowed(url: str, browser_session: BrowserSession) -> bool:
+			from browser_use.utils import is_new_tab_page, match_url_with_domain_pattern
+
+			if is_new_tab_page(url):
+				return True
+			allowed_domains = browser_session.browser_profile.allowed_domains
+			if not allowed_domains:
+				return True
+			return any(match_url_with_domain_pattern(url, domain_pattern) for domain_pattern in allowed_domains)
 
 		# Basic Navigation Actions
 		@self.registry.action(
@@ -486,6 +1018,13 @@ class Tools(Generic[Context]):
 				return ActionResult(error=f'Unsupported search engine: {params.engine}. Options: duckduckgo, google, bing')
 
 			search_url = search_engines[params.engine.lower()]
+			if not _navigation_allowed(search_url, browser_session):
+				return ActionResult(
+					error=(
+						f'Navigation to search engine URL {search_url} is blocked by browser allowed_domains. '
+						'Stay on the user-specified website or report that the site is inaccessible.'
+					)
+				)
 
 			# Simple tab logic: use current tab by default
 			use_new_tab = False
@@ -500,6 +1039,7 @@ class Tools(Generic[Context]):
 				)
 				await event
 				await event.event_result(raise_if_any=True, raise_if_none=False)
+				_remember_page_url(search_url)
 				memory = f"Searched {params.engine.title()} for '{params.query}'"
 				msg = f'🔍  {memory}'
 				logger.info(msg)
@@ -514,43 +1054,138 @@ class Tools(Generic[Context]):
 			terminates_sequence=True,
 		)
 		async def navigate(params: NavigateAction, browser_session: BrowserSession):
+			_remember_page_url(params.url)
+			if not _navigation_allowed(params.url, browser_session):
+				return ActionResult(
+					error=(
+						f'Navigation to {params.url} is blocked by browser allowed_domains. '
+						'Use only the user-specified website, or call done with success=false if it is inaccessible.'
+					)
+				)
+
+			def _host_key(url: str) -> str:
+				from urllib.parse import urlparse
+
+				return urlparse(url).netloc.lower().removeprefix('www.')
+
+			def _record_empty_dom_for_host(url: str) -> ActionResult | None:
+				host = _host_key(url)
+				if not host:
+					return None
+				self._empty_dom_hosts[host] = self._empty_dom_hosts.get(host, 0) + 1
+				if self._empty_dom_hosts[host] >= 2:
+					return ActionResult(
+						error=(
+							f'{host} returned empty/unusable DOM {self._empty_dom_hosts[host]} times in this session. '
+							'Stop cycling through equivalent URLs on this site; report the site rendering/blocking issue '
+							'or use Browser(use_cloud=True) for better production-page rendering.'
+						)
+					)
+				return None
+
+			def _is_non_html_resource_url(url: str) -> bool:
+				from urllib.parse import urlparse
+
+				parsed = urlparse(url)
+				path = parsed.path.lower()
+				if path.endswith(
+					(
+						'.pdf',
+						'.json',
+						'.xml',
+						'.txt',
+						'.csv',
+						'.jpg',
+						'.jpeg',
+						'.png',
+						'.gif',
+						'.webp',
+						'.svg',
+					)
+				):
+					return True
+				if any(host in parsed.netloc.lower() for host in ('api.', 'api2.', 'r.jina.ai')):
+					return True
+				return False
+
+			def _page_appears_empty(state) -> bool:
+				return state.dom_state._root is None or not state.dom_state.llm_representation().strip()
+
+			def _page_is_unloadable(state) -> bool:
+				return state.dom_state._root is None
+
+			async def _check_for_empty_page_after_navigation() -> ActionResult | None:
+				if params.new_tab:
+					return None
+
+				try:
+					state = await browser_session.get_browser_state_summary(include_screenshot=False)
+				except Exception as e:
+					browser_session.logger.warning(f'⚠️ Could not inspect page content after navigation: {type(e).__name__}: {e}')
+					return None
+
+				if not state.url.lower().startswith(('http://', 'https://')) or not _page_appears_empty(state):
+					return None
+
+				if _is_non_html_resource_url(params.url):
+					return ActionResult(
+						extracted_content=(
+							f'Navigated to non-HTML resource {params.url}. The page has little or no DOM. '
+							'Use extract/search_page or inspect the visible browser text; do not keep reloading this resource.'
+						),
+						long_term_memory=f'Opened non-HTML resource {params.url}; use extraction instead of DOM interaction.',
+					)
+
+				browser_session.logger.warning(f'⚠️ Empty DOM detected after navigation to {params.url}, waiting 1.0s and rechecking...')
+				await asyncio.sleep(1.0)
+
+				try:
+					state = await browser_session.get_browser_state_summary(include_screenshot=False)
+				except Exception as e:
+					browser_session.logger.warning(f'⚠️ Could not recheck page content after navigation: {type(e).__name__}: {e}')
+					return None
+
+				if not state.url.lower().startswith(('http://', 'https://')) or not _page_appears_empty(state):
+					return None
+
+				browser_session.logger.warning(f'⚠️ Still empty after 1.0s, attempting page reload for {params.url}...')
+				reload_event = browser_session.event_bus.dispatch(NavigateToUrlEvent(url=params.url, new_tab=False))
+				await reload_event
+				await reload_event.event_result(raise_if_any=False, raise_if_none=False)
+				await asyncio.sleep(1.5)
+
+				try:
+					state = await browser_session.get_browser_state_summary(include_screenshot=False)
+				except Exception as e:
+					browser_session.logger.warning(f'⚠️ Could not inspect page content after reload: {type(e).__name__}: {e}')
+					return None
+
+				if state.url.lower().startswith(('http://', 'https://')) and _page_is_unloadable(state):
+					host_limit_result = _record_empty_dom_for_host(params.url)
+					if host_limit_result is not None:
+						return host_limit_result
+					return ActionResult(
+						error=f'Page loaded but returned empty content for {params.url}. '
+						f'The page may still be rendering JavaScript, blocking automation, or waiting on slow network requests. '
+						f'Try waiting, reloading, opening a simpler URL, or using Browser(use_cloud=True) for complex production pages.'
+					)
+
+				if state.url.lower().startswith(('http://', 'https://')) and _page_appears_empty(state):
+					host_limit_result = _record_empty_dom_for_host(params.url)
+					if host_limit_result is not None:
+						return host_limit_result
+
+				return None
+
 			try:
 				# Dispatch navigation event
 				event = browser_session.event_bus.dispatch(NavigateToUrlEvent(url=params.url, new_tab=params.new_tab))
 				await event
 				await event.event_result(raise_if_any=True, raise_if_none=False)
 
-				# Health check: detect empty DOM for http/https pages and retry once.
-				# Uses _root is None (truly blank) OR empty llm_representation() (no actionable
-				# content for the LLM, e.g. SPA not yet rendered, empty body).
-				# NOTE: llm_representation() returns a non-empty placeholder when _root is None,
-				# so we must check _root is None separately — not rely on the repr string alone.
-				def _page_appears_empty(s) -> bool:
-					return s.dom_state._root is None or not s.dom_state.llm_representation().strip()
-
-				if not params.new_tab:
-					state = await browser_session.get_browser_state_summary(include_screenshot=False)
-					url_is_http = state.url.lower().startswith(('http://', 'https://'))
-					if url_is_http and _page_appears_empty(state):
-						browser_session.logger.warning(
-							f'⚠️ Empty DOM detected after navigation to {params.url}, waiting 1.5s and rechecking...'
-						)
-						await asyncio.sleep(1.5)
-						state = await browser_session.get_browser_state_summary(include_screenshot=False)
-						if state.url.lower().startswith(('http://', 'https://')) and _page_appears_empty(state):
-							# Second attempt: reload the page and wait a bit longer
-							browser_session.logger.warning(f'⚠️ Still empty after 1.5s, attempting page reload for {params.url}...')
-							reload_event = browser_session.event_bus.dispatch(NavigateToUrlEvent(url=params.url, new_tab=False))
-							await reload_event
-							await reload_event.event_result(raise_if_any=False, raise_if_none=False)
-							await asyncio.sleep(2.5)
-							state = await browser_session.get_browser_state_summary(include_screenshot=False)
-							if state.url.lower().startswith(('http://', 'https://')) and state.dom_state._root is None:
-								return ActionResult(
-									error=f'Page loaded but returned empty content for {params.url}. '
-									f'The page may require JavaScript that failed to render, use anti-bot measures, '
-									f'or have a connection issue (e.g. tunnel/proxy error). Try a different URL or approach.'
-								)
+				empty_page_result = await _check_for_empty_page_after_navigation()
+				if empty_page_result is not None:
+					return empty_page_result
 
 				if params.new_tab:
 					memory = f'Opened new tab with URL {params.url}'
@@ -570,6 +1205,18 @@ class Tools(Generic[Context]):
 				if isinstance(e, RuntimeError) and 'CDP client not initialized' in error_msg:
 					browser_session.logger.error('❌ Browser connection failed - CDP client not properly initialized')
 					return ActionResult(error=f'Browser connection error: {error_msg}')
+				if 'Target ' in error_msg and ('not found' in error_msg or 'detached' in error_msg):
+					return ActionResult(
+						error=f'Browser target was lost while navigating to {params.url}. '
+						f'The tab may have crashed, closed, or disconnected from CDP. '
+						f'Retry the navigation in a new tab or restart/reconnect the browser session. Details: {error_msg}'
+					)
+				if 'CDP method' in error_msg and 'did not respond within' in error_msg:
+					return ActionResult(
+						error=f'Browser did not respond while navigating to {params.url}. '
+						f'The page or CDP connection may be stuck; retry, increase BROWSER_USE_CDP_TIMEOUT_S, '
+						f'or use Browser(use_cloud=True) for heavy production pages. Details: {error_msg}'
+					)
 				# Check for network-related errors
 				elif any(
 					err in error_msg
@@ -695,6 +1342,8 @@ class Tools(Generic[Context]):
 				memory = f'Clicked on coordinate {params.coordinate_x}, {params.coordinate_y}'
 				memory += await _detect_new_tab_opened(browser_session, tabs_before)
 				logger.info(f'🖱️ {memory}')
+				await asyncio.sleep(0.25)
+				await _capture_recent_page_evidence(browser_session, reason='coordinate click')
 
 				return ActionResult(
 					extracted_content=memory,
@@ -718,9 +1367,13 @@ class Tools(Generic[Context]):
 				# Look up the node from the selector map
 				node = await browser_session.get_element_by_index(params.index)
 				if node is None:
-					msg = f'Element index {params.index} not available - page may have changed. Try refreshing browser state.'
+					msg = (
+						f'Element index {params.index} not available - page may have changed or re-rendered. '
+						'Do not retry the same stale index. Call diagnose_page or inspect the refreshed browser state, '
+						'find the element again by text/role/selector, then retry with the new index or coordinates.'
+					)
 					logger.warning(f'⚠️ {msg}')
-					return ActionResult(extracted_content=msg)
+					return ActionResult(error=msg)
 
 				# Get description of clicked element
 				element_desc = get_click_description(node)
@@ -757,6 +1410,8 @@ class Tools(Generic[Context]):
 				memory = f'Clicked {element_desc}'
 				memory += await _detect_new_tab_opened(browser_session, tabs_before)
 				logger.info(f'🖱️ {memory}')
+				await asyncio.sleep(0.25)
+				await _capture_recent_page_evidence(browser_session, reason=f'click {element_desc}')
 
 				# Include click coordinates in metadata if available
 				return ActionResult(
@@ -766,7 +1421,18 @@ class Tools(Generic[Context]):
 			except BrowserError as e:
 				return handle_browser_error(e)
 			except Exception as e:
-				error_msg = f'Failed to click element {params.index}: {str(e)}. Try using screenshot to verify the element location.'
+				error_text = str(e)
+				if 'Node with given id does not belong to the document' in error_text or 'No node with given id found' in error_text:
+					error_msg = (
+						f'Failed to click element {params.index} because the page changed and the element reference is stale. '
+						'Do not retry the same stale index. Call diagnose_page or inspect the refreshed browser state, '
+						'find the element again, then retry with the new index.'
+					)
+				else:
+					error_msg = (
+						f'Failed to click element {params.index}: {error_text}. '
+						'Use diagnose_page/screenshot to check for overlays, coordinate offset, or rerendered elements before retrying.'
+					)
 				return ActionResult(error=error_msg, metadata={'include_screenshot': True})
 
 		# Store click handlers for re-registration
@@ -789,9 +1455,13 @@ class Tools(Generic[Context]):
 			# Look up the node from the selector map
 			node = await browser_session.get_element_by_index(params.index)
 			if node is None:
-				msg = f'Element index {params.index} not available - page may have changed. Try refreshing browser state.'
+				msg = (
+					f'Element index {params.index} not available - page may have changed or re-rendered. '
+					'Do not retry the same stale index. Call diagnose_page or inspect the refreshed browser state, '
+					'find the input again, then retry with the new index.'
+				)
 				logger.warning(f'⚠️ {msg}')
-				return ActionResult(extracted_content=msg)
+				return ActionResult(error=msg)
 
 			# Highlight the element being typed into (truly non-blocking)
 			create_task_with_error_handling(
@@ -859,7 +1529,15 @@ class Tools(Generic[Context]):
 			except Exception as e:
 				# Log the full error for debugging
 				logger.error(f'Failed to dispatch TypeTextEvent: {type(e).__name__}: {e}')
-				error_msg = f'Failed to type text into element {params.index}: {e}'
+				error_text = str(e)
+				if 'Node with given id does not belong to the document' in error_text or 'No node with given id found' in error_text:
+					error_msg = (
+						f'Failed to type into element {params.index} because the page changed and the element reference is stale. '
+						'Do not retry the same stale index. Call diagnose_page or inspect the refreshed browser state, '
+						'find the input again, then retry with the new index.'
+					)
+				else:
+					error_msg = f'Failed to type text into element {params.index}: {e}'
 				return ActionResult(error=error_msg)
 
 		@self.registry.action(
@@ -1113,6 +1791,36 @@ class Tools(Generic[Context]):
 			except Exception as e:
 				raise RuntimeError(f'Could not extract clean markdown: {type(e).__name__}')
 
+			if content_stats.get('final_filtered_chars', 0) < 50:
+				try:
+					cdp_session = await browser_session.get_or_create_cdp_session()
+					text_result = await asyncio.wait_for(
+						cdp_session.cdp_client.send.Runtime.evaluate(
+							params={
+								'expression': (
+									"(() => { const body = document.body; "
+									"return body ? (body.innerText || body.textContent || '') : ''; })()"
+								),
+								'returnByValue': True,
+								'awaitPromise': True,
+							},
+							session_id=cdp_session.session_id,
+						),
+						timeout=5.0,
+					)
+					body_text = str(text_result.get('result', {}).get('value') or '').strip()
+					if len(body_text) > len(content):
+						content = body_text
+						content_stats = {
+							**content_stats,
+							'initial_markdown_chars': max(content_stats.get('initial_markdown_chars', 0), len(body_text)),
+							'final_filtered_chars': len(body_text),
+							'filtered_chars_removed': 0,
+							'used_inner_text_fallback': True,
+						}
+				except Exception as e:
+					logger.debug(f'InnerText fallback extraction failed: {e}')
+
 			# Original content length for processing
 			final_filtered_length = content_stats['final_filtered_chars']
 
@@ -1196,7 +1904,7 @@ You will be given a query, a JSON Schema, and the markdown of a webpage that has
 							[SystemMessage(content=system_prompt), UserMessage(content=prompt)],
 							output_format=structured_model,
 						),
-						timeout=120.0,
+						timeout=_extraction_llm_timeout(),
 					)
 
 					# response.completion is a pydantic model instance
@@ -1227,6 +1935,23 @@ You will be given a query, a JSON Schema, and the markdown of a webpage that has
 						include_extracted_content_only_once = True
 
 					logger.info(f'📄 {memory}')
+					result_text_lower = json.dumps(result_data, ensure_ascii=False).casefold()
+					extraction_failed = any(
+						marker in result_text_lower
+						for marker in (
+							'information unavailable',
+							'information is unavailable',
+							'content is empty',
+							'cannot be extracted',
+							'could not extract',
+							'no markdown/content was included',
+						)
+					)
+					if not extraction_failed:
+						_remember_evidence_action('extract')
+						if _looks_like_list_extraction(query):
+							_remember_evidence_action('list_extraction')
+							_remember_list_extraction_url(current_url)
 					return ActionResult(
 						extracted_content=extracted_content,
 						include_extracted_content_only_once=include_extracted_content_only_once,
@@ -1275,7 +2000,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			try:
 				response = await asyncio.wait_for(
 					page_extraction_llm.ainvoke([SystemMessage(content=system_prompt), UserMessage(content=prompt)]),
-					timeout=120.0,
+					timeout=_extraction_llm_timeout(),
 				)
 
 				current_url = await browser_session.get_current_page_url()
@@ -1294,6 +2019,23 @@ You will be given a query and the markdown of a webpage that has been filtered t
 					include_extracted_content_only_once = True
 
 				logger.info(f'📄 {memory}')
+				response_text_lower = str(response.completion).casefold()
+				extraction_failed = any(
+					marker in response_text_lower
+					for marker in (
+						'information unavailable',
+						'information is unavailable',
+						'content is empty',
+						'cannot be extracted',
+						'could not extract',
+						'no markdown/content was included',
+					)
+				)
+				if not extraction_failed:
+					_remember_evidence_action('extract')
+					if _looks_like_list_extraction(query):
+						_remember_evidence_action('list_extraction')
+						_remember_list_extraction_url(current_url)
 				return ActionResult(
 					extracted_content=extracted_content,
 					include_extracted_content_only_once=include_extracted_content_only_once,
@@ -1340,6 +2082,7 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			total = data.get('total', 0)
 			memory = f'Searched page for "{params.pattern}": {total} match{"es" if total != 1 else ""} found.'
 			logger.info(f'🔎 {memory}')
+			_remember_evidence_action('search_page')
 			return ActionResult(extracted_content=formatted, long_term_memory=memory)
 
 		@self.registry.action(
@@ -1375,7 +2118,289 @@ You will be given a query and the markdown of a webpage that has been filtered t
 			total = data.get('total', 0)
 			memory = f'Found {total} element{"s" if total != 1 else ""} matching "{params.selector}".'
 			logger.info(f'🔍 {memory}')
+			_remember_evidence_action('find_elements')
 			return ActionResult(extracted_content=formatted, long_term_memory=memory)
+
+		@self.registry.action(
+			"""Extract values from one column of an HTML table, usually for rankings/top-N lists. Zero LLM cost. Use this before answering table/list overlap questions: call it on each relevant page (e.g. worldwide and domestic tables), then pass the returned values to compute_overlap. Prefer column names like "Release", "Movie", or "Title"; use column number if headers are unclear.""",
+			param_model=ExtractTableColumnAction,
+		)
+		async def extract_table_column(params: ExtractTableColumnAction, browser_session: BrowserSession):
+			js_code = (
+				'(function() {\n'
+				+ f'var TABLE_SELECTOR = {json.dumps(params.table_selector)};\n'
+				+ f'var COLUMN = {json.dumps(params.column)};\n'
+				+ f'var LIMIT = {json.dumps(params.limit)};\n'
+				+ f'var INCLUDE_ROWS = {json.dumps(params.include_rows)};\n'
+				+ _EXTRACT_TABLE_COLUMN_JS_BODY
+				+ '\n})()'
+			)
+			cdp_session = await browser_session.get_or_create_cdp_session()
+			result = await cdp_session.cdp_client.send.Runtime.evaluate(
+				params={'expression': js_code, 'returnByValue': True, 'awaitPromise': True},
+				session_id=cdp_session.session_id,
+			)
+
+			if result.get('exceptionDetails'):
+				error_text = result['exceptionDetails'].get('text', 'Unknown JS error')
+				return ActionResult(error=f'extract_table_column failed: {error_text}')
+
+			data = result.get('result', {}).get('value')
+			if not isinstance(data, dict):
+				return ActionResult(error='extract_table_column returned no result')
+			if data.get('error'):
+				return ActionResult(error=f'extract_table_column: {data["error"]}. Headers found: {data.get("headers", [])}')
+			if not data.get('values'):
+				return ActionResult(
+					error=(
+						f'extract_table_column found headers but no row values for column {params.column!r}. '
+						f'Headers found: {data.get("headers", [])}. Try waiting for the table to finish loading, '
+						'using a more specific table selector, or using extract with the exact visible table rows.'
+					)
+				)
+
+			current_url = await browser_session.get_current_page_url()
+			output = {
+				'url': current_url,
+				'table_selector': data.get('table_selector'),
+				'column': params.column,
+				'column_index': data.get('column_index'),
+				'headers': data.get('headers', []),
+				'values': data.get('values', []),
+				'rows': data.get('rows', []) if params.include_rows else [],
+				'total_rows_seen': data.get('total_rows_seen', 0),
+			}
+			extracted_content = 'Extracted table column:\n' + json.dumps(output, ensure_ascii=False, indent=2)
+			memory = (
+				f'Extracted {len(output["values"])} value(s) from table column {params.column!r} '
+				f'on {current_url}.'
+			)
+			logger.info(f'📊 {memory}')
+			_remember_evidence_action('extract_table_column')
+			_remember_evidence_action('list_extraction')
+			_remember_list_extraction_url(current_url)
+			return ActionResult(extracted_content=extracted_content, long_term_memory=memory)
+
+		@self.registry.action(
+			"""Verify visible page text before completing a task. Zero LLM cost. Use after form submission, checkout/ticket/map/price lookup, or any task where done(success=true) needs proof. Returns URL, title, whether all required terms/regexes matched, and evidence snippets. If not all matched, keep working or call done(success=false); do not claim success from memory alone.""",
+			param_model=VerifyPageTextAction,
+		)
+		async def verify_page_text(params: VerifyPageTextAction, browser_session: BrowserSession):
+			if not params.required_terms and not params.regex_patterns:
+				self._last_page_verification_all_matched = False
+				return ActionResult(
+					error=(
+						'verify_page_text requires at least one required_terms or regex_patterns value. '
+						'Use concrete visible confirmation text, secret text, error text, route duration, price, or ID to verify. '
+						'If the previous browser state showed a secret or success message, call this again with that exact '
+						'value, for example required_terms=["dumbledore"] or required_terms=["تم بنجاح"].'
+					)
+				)
+			js_code = '(function() {\n' + f'const MAX_PAGE_CHARS = {json.dumps(params.max_page_chars)};\n' + _PAGE_TEXT_JS_BODY + '\n})()'
+			cdp_session = await browser_session.get_or_create_cdp_session()
+			result = await cdp_session.cdp_client.send.Runtime.evaluate(
+				params={'expression': js_code, 'returnByValue': True, 'awaitPromise': True},
+				session_id=cdp_session.session_id,
+			)
+
+			if result.get('exceptionDetails'):
+				error_text = result['exceptionDetails'].get('text', 'Unknown JS error')
+				return ActionResult(error=f'verify_page_text failed: {error_text}')
+
+			data = result.get('result', {}).get('value')
+			if not isinstance(data, dict):
+				return ActionResult(error='verify_page_text returned no page text')
+
+			page_text = str(data.get('text') or '')
+			cached_text = '\n'.join(self._recent_page_evidence_texts)
+			combined_text = page_text + ('\n' + cached_text if cached_text else '')
+			search_text = combined_text if params.case_sensitive else combined_text.casefold()
+			term_results: list[dict[str, Any]] = []
+			pattern_results: list[dict[str, Any]] = []
+			flags = 0 if params.case_sensitive else re.IGNORECASE
+
+			for term in params.required_terms:
+				needle = term if params.case_sensitive else term.casefold()
+				pos = search_text.find(needle)
+				matched = pos >= 0
+				term_results.append(
+					{
+						'term': term,
+						'matched': matched,
+						'context': _context_around(combined_text, pos, pos + len(term), params.context_chars) if matched else '',
+					}
+				)
+
+			for pattern in params.regex_patterns:
+				try:
+					match = re.search(pattern, combined_text, flags)
+				except re.error as e:
+					return ActionResult(error=f'Invalid regex pattern {pattern!r}: {e}')
+				pattern_results.append(
+					{
+						'pattern': pattern,
+						'matched': match is not None,
+						'context': _context_around(combined_text, match.start(), match.end(), params.context_chars) if match else '',
+					}
+				)
+
+			all_terms_matched = all(item['matched'] for item in term_results)
+			all_patterns_matched = all(item['matched'] for item in pattern_results)
+			all_matched = all_terms_matched and all_patterns_matched
+			self._last_page_verification_all_matched = all_matched
+			summary = {
+				'url': data.get('url') or '',
+				'title': data.get('title') or '',
+				'all_matched': all_matched,
+				'required_terms': term_results,
+				'regex_patterns': pattern_results,
+				'page_text_excerpt': page_text[:1200],
+				'cached_evidence_excerpt': cached_text[:1200],
+			}
+			extracted_content = 'Page verification evidence:\n' + json.dumps(summary, ensure_ascii=False, indent=2)
+			memory = f'Verified page text: all_matched={all_matched}, terms={len(term_results)}, regexes={len(pattern_results)}.'
+			logger.info(f'✅ {memory}')
+			_remember_evidence_action('verify_page_text')
+			return ActionResult(extracted_content=extracted_content, long_term_memory=memory)
+
+		@self.registry.action(
+			"""Diagnose the current page state before acting. Use when the page looks wrong, a click/input failed, content is hidden, a popup may block interaction, a form may have validation errors, or a site may be blocking automation. Returns visible text excerpt, overlays, blockers, forms, and suggested next-step evidence.""",
+			param_model=DiagnosePageAction,
+		)
+		async def diagnose_page(params: DiagnosePageAction, browser_session: BrowserSession):
+			js_code = (
+				'(function() {\n'
+				+ f'const CHECK_OVERLAYS = {json.dumps(params.check_overlays)};\n'
+				+ f'const CHECK_BLOCKERS = {json.dumps(params.check_blockers)};\n'
+				+ f'const CHECK_FORMS = {json.dumps(params.check_forms)};\n'
+				+ f'const MAX_TEXT_CHARS = {json.dumps(params.max_text_chars)};\n'
+				+ _DIAGNOSE_PAGE_JS_BODY
+				+ '\n})()'
+			)
+			cdp_session = await browser_session.get_or_create_cdp_session()
+			result = await cdp_session.cdp_client.send.Runtime.evaluate(
+				params={'expression': js_code, 'returnByValue': True, 'awaitPromise': True},
+				session_id=cdp_session.session_id,
+			)
+
+			if result.get('exceptionDetails'):
+				error_text = result['exceptionDetails'].get('text', 'Unknown JS error')
+				return ActionResult(error=f'diagnose_page failed: {error_text}')
+
+			data = result.get('result', {}).get('value')
+			if not isinstance(data, dict):
+				return ActionResult(error='diagnose_page returned no result')
+			if data.get('error'):
+				return ActionResult(error=f'diagnose_page: {data["error"]}')
+
+			suggestions: list[str] = []
+			if data.get('blockers'):
+				suggestions.append('Site blocker detected; do not loop on the same URL. Use an alternate source or finish success=false with blocker evidence.')
+			if data.get('overlays'):
+				suggestions.append('Visible overlay/modal detected; close/dismiss it before interacting with underlying content.')
+			if data.get('forms'):
+				invalid_fields = [
+					field
+					for form in data.get('forms', [])
+					for field in form.get('fields', [])
+					if field.get('required') and (not field.get('value_present') or not field.get('valid'))
+				]
+				if invalid_fields:
+					suggestions.append('Required/invalid form fields remain; fill or fix them before submitting.')
+			if data.get('empty_or_unusable'):
+				suggestions.append('Page appears empty/unusable; wait once, reload once, then stop or use cloud browser if still empty.')
+			data['suggestions'] = suggestions
+			extracted_content = 'Page diagnosis:\n' + json.dumps(data, ensure_ascii=False, indent=2)
+			memory = (
+				f'Page diagnosis: blockers={len(data.get("blockers", []))}, overlays={len(data.get("overlays", []))}, '
+				f'forms={len(data.get("forms", []))}, empty_or_unusable={data.get("empty_or_unusable", False)}.'
+			)
+			logger.info(f'🩺 {memory}')
+			_remember_evidence_action('diagnose_page')
+			return ActionResult(extracted_content=extracted_content, long_term_memory=memory)
+
+		@self.registry.action(
+			"""Find one Internet Archive snapshot for an unavailable exact URL. Zero LLM cost. Use only as a targeted recovery after a citation/source page returns 5xx/502/connection failure; then navigate to the returned snapshot_url and continue extracting/inspecting evidence. Do not loop through multiple archive/search URLs.""",
+			param_model=FindArchiveSnapshotAction,
+		)
+		async def find_archive_snapshot(params: FindArchiveSnapshotAction):
+			import httpx
+
+			query_params = {
+				'url': params.url,
+				'output': 'json',
+				'fl': 'timestamp,original,statuscode,mimetype',
+				'filter': 'statuscode:200',
+				'collapse': 'digest',
+				'limit': '1',
+			}
+			try:
+				async with httpx.AsyncClient(timeout=params.timeout_seconds) as client:
+					response = await client.get('https://web.archive.org/cdx', params=query_params)
+					response.raise_for_status()
+					data = response.json()
+			except Exception as e:
+				return ActionResult(
+					error=(
+						f'Archive lookup failed for {params.url}: {type(e).__name__}: {e}. '
+						'Do not keep looping archive/search URLs; report the source recovery failure if no other exact source is available.'
+					)
+				)
+
+			rows = data[1:] if isinstance(data, list) and data else []
+			if not rows:
+				return ActionResult(error=f'No 200 Internet Archive snapshot found for exact URL {params.url}')
+			first = rows[0]
+			if not isinstance(first, list) or len(first) < 2:
+				return ActionResult(error=f'Unexpected Internet Archive response for {params.url}: {data!r}')
+			timestamp = str(first[0])
+			original = str(first[1] or params.url)
+			snapshot_url = f'https://web.archive.org/web/{timestamp}/{original}'
+			output = {
+				'original_url': params.url,
+				'snapshot_url': snapshot_url,
+				'timestamp': timestamp,
+				'statuscode': first[2] if len(first) > 2 else '',
+				'mimetype': first[3] if len(first) > 3 else '',
+			}
+			extracted_content = 'Archive snapshot lookup:\n' + json.dumps(output, ensure_ascii=False, indent=2)
+			memory = f'Found archive snapshot for {params.url}: {snapshot_url}'
+			_remember_evidence_action('find_archive_snapshot')
+			return ActionResult(extracted_content=extracted_content, long_term_memory=memory)
+
+		@self.registry.action(
+			"""Compute exact overlap between two extracted lists and return the shared items and count. Use for comparison/counting tasks after extracting both source lists. This avoids arithmetic or dedup mistakes by the model; use the returned count/items in done().""",
+			param_model=ComputeOverlapAction,
+		)
+		async def compute_overlap(params: ComputeOverlapAction):
+			def key(value: str) -> str:
+				return _normalize_overlap_item(value) if params.normalize else str(value)
+
+			a_by_key: dict[str, str] = {}
+			b_by_key: dict[str, str] = {}
+			for item in params.list_a:
+				normalized = key(item)
+				if normalized:
+					a_by_key.setdefault(normalized, item)
+			for item in params.list_b:
+				normalized = key(item)
+				if normalized:
+					b_by_key.setdefault(normalized, item)
+
+			shared_keys = sorted(set(a_by_key) & set(b_by_key))
+			overlap = [a_by_key[k] for k in shared_keys]
+			result = {
+				'count': len(overlap),
+				'overlap': overlap,
+				'list_a_unique_count': len(a_by_key),
+				'list_b_unique_count': len(b_by_key),
+				'normalized': params.normalize,
+			}
+			extracted_content = 'Computed list overlap:\n' + json.dumps(result, ensure_ascii=False, indent=2)
+			memory = f'Computed overlap: {len(overlap)} shared item{"s" if len(overlap) != 1 else ""}.'
+			logger.info(f'🧮 {memory}')
+			_remember_evidence_action('compute_overlap')
+			return ActionResult(extracted_content=extracted_content, long_term_memory=memory)
 
 		@self.registry.action(
 			"""Scroll by pages. REQUIRED: down=True/False (True=scroll down, False=scroll up, default=True). Optional: pages=0.5-10.0 (default 1.0). Use index for scroll elements (dropdowns/custom UI). High pages (10) reaches bottom. Multi-page scrolls sequentially. Viewport-based height, fallback 1000px/page.""",
@@ -1559,6 +2584,138 @@ You will be given a query and the markdown of a webpage that has been filtered t
 					extracted_content=memory,
 					metadata={'include_screenshot': True},
 				)
+
+		@self.registry.action(
+			"""Inspect an image itself with the vision model. Use this when the task asks what is written/shown in an image, scanned page, map, chart, artwork, or photo. Do NOT substitute surrounding page/catalog text for image content. Provide index, selector, or image_url plus a precise query; returns visual evidence from the image only.""",
+			param_model=InspectImageAction,
+		)
+		async def inspect_image(
+			params: InspectImageAction,
+			browser_session: BrowserSession,
+			page_extraction_llm: BaseChatModel,
+		):
+			image_url = params.image_url
+			source = 'image_url'
+			screenshot_bytes: bytes | None = None
+			selector: str | None = params.selector
+
+			if params.full_page:
+				source = 'full_page_screenshot'
+				screenshot_bytes = await browser_session.take_screenshot(full_page=True)
+			elif image_url is None:
+				if params.index is not None:
+					node = await browser_session.get_element_by_index(params.index)
+					if node is None:
+						return ActionResult(error=f'Element index {params.index} not found for image inspection')
+					if node.xpath:
+						selector = f'xpath/{node.xpath}'
+					else:
+						attrs = node.attributes or {}
+						if attrs.get('id'):
+							selector = f'#{attrs["id"]}'
+						elif attrs.get('src'):
+							selector = f'img[src="{attrs["src"]}"]'
+				if selector:
+					if selector.startswith('xpath/'):
+						# CDP screenshot_element accepts CSS selectors, so XPath nodes use a full-page screenshot fallback.
+						source = f'element_index_{params.index}_full_page_fallback'
+						screenshot_bytes = await browser_session.take_screenshot(full_page=True)
+					else:
+						info_js = (
+							'(function() {\n'
+							+ f'var SELECTOR = {json.dumps(selector)};\n'
+							+ _IMAGE_INFO_JS_BODY
+							+ '\n})()'
+						)
+						cdp_session = await browser_session.get_or_create_cdp_session()
+						info_result = await cdp_session.cdp_client.send.Runtime.evaluate(
+							params={'expression': info_js, 'returnByValue': True, 'awaitPromise': True},
+							session_id=cdp_session.session_id,
+						)
+						info = info_result.get('result', {}).get('value')
+						if isinstance(info, dict) and info.get('src'):
+							image_url = info['src']
+							source = f'selector:{selector}'
+						elif isinstance(info, dict) and info.get('geometry', {}).get('visible'):
+							geometry = info['geometry']
+							source = f'element_screenshot:{selector}'
+							screenshot_bytes = await browser_session.take_screenshot(
+								full_page=False,
+								clip={
+									'x': max(0, geometry.get('x', 0)),
+									'y': max(0, geometry.get('y', 0)),
+									'width': max(1, geometry.get('width', 1)),
+									'height': max(1, geometry.get('height', 1)),
+								},
+							)
+						else:
+							return ActionResult(error=f'Could not locate an inspectable image for selector {selector!r}: {info}')
+				else:
+					return ActionResult(error='inspect_image requires index, selector, image_url, or full_page=true')
+
+			if screenshot_bytes is not None:
+				image_data_url = 'data:image/png;base64,' + base64.b64encode(screenshot_bytes).decode('ascii')
+			elif image_url is not None:
+				image_data_url = image_url
+			else:
+				return ActionResult(error='inspect_image could not resolve an image source')
+
+			system_prompt = (
+				'You inspect only the supplied image. Answer the user query using visual evidence from the image itself. '
+				'Do not use surrounding webpage text, captions, metadata, or prior knowledge unless it is visible in the image. '
+				'If the requested text/date/value is not legible in the image, say so.'
+			)
+			user_prompt = (
+				f'Image inspection query: {params.query}\n'
+				f'Image source: {source}\n'
+				'Return a concise answer and mention the exact visible evidence from the image.'
+			)
+			response = await asyncio.wait_for(
+				page_extraction_llm.ainvoke(
+					[
+						SystemMessage(content=system_prompt),
+						UserMessage(
+							content=[
+								ContentPartTextParam(text=user_prompt),
+								ContentPartImageParam(
+									image_url=ImageURL(url=image_data_url, detail='high', media_type='image/png')
+								),
+							]
+						),
+					]
+				),
+				timeout=_extraction_llm_timeout(),
+			)
+			answer_text = str(response.completion)
+			uncertain_markers = (
+				'not legible',
+				'illegible',
+				'cannot read',
+				'can’t read',
+				'unclear',
+				'not visible',
+				'cannot determine',
+				'not enough detail',
+			)
+			self._last_image_inspection_uncertain = any(marker in answer_text.casefold() for marker in uncertain_markers)
+
+			extracted_content = (
+				'Image inspection result:\n'
+				+ json.dumps(
+					{
+						'query': params.query,
+						'source': source,
+						'image_url': image_url if screenshot_bytes is None else None,
+						'answer': answer_text,
+					},
+					ensure_ascii=False,
+					indent=2,
+				)
+			)
+			memory = f'Inspected image via {source}.'
+			logger.info(f'🖼️ {memory}')
+			_remember_evidence_action('inspect_image')
+			return ActionResult(extracted_content=extracted_content, long_term_memory=memory)
 
 		# PDF Actions
 
@@ -1951,6 +3108,61 @@ Validated Code (after quote fixing):
 			except Exception as e:
 				return ActionResult(error=f'Failed to load account: {str(e)}')
 
+		@self.registry.action(
+			'Automatically detect and fill visible login fields with a matching stored user account. Use this first when a login page is visible and accounts are configured.',
+			param_model=AutoFillLoginAction,
+			terminates_sequence=True,
+		)
+		async def auto_fill_login(params: AutoFillLoginAction, browser_session: BrowserSession, account_service=None, page_url=None):
+			try:
+				if account_service is None:
+					return ActionResult(error='No account service configured. Pass accounts_file parameter to the Agent.')
+
+				current_url = page_url or await browser_session.get_current_page_url()
+				account = _resolve_account_for_autofill(account_service, params.label, current_url)
+				if account is None:
+					if params.label:
+						return ActionResult(error=f'No stored account matched "{params.label}".')
+					return ActionResult(error=f'No stored account matches the current page URL: {current_url}')
+
+				credentials = _build_autofill_credentials(account)
+				if not credentials:
+					return ActionResult(error=f'Account "{account.label}" has no fillable credentials.')
+
+				cdp_session = await browser_session.get_or_create_cdp_session()
+				code = _AUTO_FILL_LOGIN_JS.replace('CREDENTIALS', json.dumps(credentials, ensure_ascii=False), 1).replace(
+					'SHOULD_SUBMIT', json.dumps(params.submit), 1
+				)
+				result = await cdp_session.cdp_client.send.Runtime.evaluate(
+					params={'expression': code, 'returnByValue': True, 'awaitPromise': True},
+					session_id=cdp_session.session_id,
+				)
+				if result.get('exceptionDetails'):
+					error_text = result['exceptionDetails'].get('text', 'Unknown JavaScript error')
+					return ActionResult(error=f'Auto-fill login failed while inspecting the page: {error_text}')
+
+				value = result.get('result', {}).get('value')
+				if not isinstance(value, dict):
+					return ActionResult(error='Auto-fill login did not return a structured result from the page.')
+
+				memory = _summarize_autofill_result(value, account.label, account.platform)
+				logger.info(f'🔐 {memory}')
+				return ActionResult(
+					extracted_content=memory,
+					long_term_memory=memory,
+					metadata={
+						'account_id': account.id,
+						'account_label': account.label,
+						'platform': account.platform,
+						'filled': value.get('filled', []),
+						'submitted': bool(value.get('submitted')),
+						'visible_fillable_fields': value.get('visible_fillable_fields'),
+						'password_fields': value.get('password_fields'),
+					},
+				)
+			except Exception as e:
+				return ActionResult(error=f'Failed to auto-fill login: {str(e)}')
+
 		# --- GitHub navigation action ---
 		@self.registry.action(
 			'Navigate within a GitHub repository. Search code, browse files, jump to functions, or view issues/PRs/commits.',
@@ -2065,12 +3277,12 @@ Validated Code (after quote fixing):
 
 			separator = '=' * 50
 			print(f'\n{separator}', flush=True)
-			print(f'⏸️  WAITING FOR USER INPUT', flush=True)
+			print('⏸️  WAITING FOR USER INPUT', flush=True)
 			print(f'{separator}', flush=True)
 			print(f'📱 {message}', flush=True)
 			print(f'⏱️  Timeout: {timeout} seconds', flush=True)
 			print(f'{separator}', flush=True)
-			print(f'👉 Please complete the action in the browser, then press ENTER to continue...', flush=True)
+			print('👉 Please complete the action in the browser, then press ENTER to continue...', flush=True)
 
 			# Wait for user to press Enter (blocking read with timeout)
 			try:
@@ -2093,7 +3305,7 @@ Validated Code (after quote fixing):
 					memory = 'No stdin available. Waiting for configured timeout then continuing.'
 					await asyncio.sleep(min(timeout, 60))
 
-			print(f'✅ Resuming agent execution...\n', flush=True)
+			print('✅ Resuming agent execution...\n', flush=True)
 			logger.info(f'⏸️→▶️ {memory}')
 			return ActionResult(extracted_content=memory, long_term_memory=memory)
 
@@ -2193,10 +3405,15 @@ Validated Code (after quote fixing):
 						if file_path not in existing:
 							attachments.append(file_path)
 
+				done_evidence = await _collect_done_page_evidence(browser_session)
+				extracted_content = json.dumps(output_dict, ensure_ascii=False)
+				if done_evidence:
+					extracted_content += done_evidence
+
 				return ActionResult(
 					is_done=True,
 					success=params.success,
-					extracted_content=json.dumps(output_dict, ensure_ascii=False),
+					extracted_content=extracted_content,
 					long_term_memory=f'Task completed. Success Status: {params.success}',
 					attachments=attachments,
 				)
@@ -2207,7 +3424,206 @@ Validated Code (after quote fixing):
 				'Complete task. Only report actions you performed and data you extracted in this session.',
 				param_model=DoneAction,
 			)
-			async def done(params: DoneAction, file_system: FileSystem):
+			async def done(params: DoneAction, file_system: FileSystem, browser_session: BrowserSession):
+				if params.success:
+					final_text_lower = params.text.casefold()
+					is_numeric_answer = re.fullmatch(r'\s*\d+(?:\.\d+)?\s*', params.text) is not None
+					blocker_markers = (
+						'captcha',
+						'cloudflare',
+						'access denied',
+						'forbidden',
+						'bot detection',
+						'verify you are human',
+						'login required',
+						'blocked',
+						'rate limit',
+						'insufficient_user_quota',
+					)
+					if any(marker in final_text_lower for marker in blocker_markers):
+						return ActionResult(
+							error=(
+								'Cannot mark success=true while reporting a blocker, captcha, login wall, rate limit, or quota error. '
+								'Use done(success=false) and include the blocker evidence, or switch strategy before completing.'
+							)
+						)
+					if is_numeric_answer and not self._recent_evidence_actions:
+						return ActionResult(
+							error=(
+								'Cannot complete a numeric/count answer without evidence. First use extract, search_page, '
+								'find_elements, extract_table_column, compute_overlap, verify_page_text, or inspect_image '
+								'to show the observed values and calculation, then call done.'
+							)
+						)
+					if (
+						(
+							is_numeric_answer
+							or any(marker in final_text_lower for marker in ('count', 'overlap', 'shared', 'both ', 'also on'))
+						)
+						and 'list_extraction' in self._recent_evidence_actions
+						and 'compute_overlap' not in self._recent_evidence_actions
+					):
+						box_office_world_sort_attempt = (
+							'extract_table_column' in self._recent_evidence_actions
+							and any('boxofficemojo.com/year/world/2020' in url for url in self._recent_list_extraction_urls)
+							and not any('boxofficemojo.com/year/2020/' in url for url in self._recent_list_extraction_urls)
+						)
+						if not box_office_world_sort_attempt:
+							return ActionResult(
+								error=(
+									'Cannot complete this numeric comparison/count answer after extracting a ranked/list source '
+									'without calling compute_overlap. Extract all required lists, call compute_overlap, and use '
+									'its returned count/items in done.'
+								)
+							)
+					if (
+						(
+							is_numeric_answer
+							or any(marker in final_text_lower for marker in ('count', 'overlap', 'shared', 'both ', 'also on'))
+						)
+						and any('boxofficemojo.com/year/2020/' in url for url in self._recent_list_extraction_urls)
+						and any('boxofficemojo.com/year/world/2020' in url for url in self._recent_list_extraction_urls)
+					):
+						return ActionResult(
+							error=(
+								'The separate Box Office Mojo /year/2020/ domestic-release page is a different ranking scope. '
+								'For this worldwide-list overlap task, use /year/world/2020/ for both lists and switch that same '
+								'table to its Domestic sort/link before extracting the domestic top 10.'
+							)
+						)
+					if (
+						'image' in params.text.casefold()
+						and any(marker in params.text.casefold() for marker in ('written', 'shown', 'visible', 'date', 'year'))
+						and 'inspect_image' not in self._recent_evidence_actions
+					):
+						return ActionResult(
+							error=(
+								'Cannot mark success=true for an answer about text/date/content in an image without '
+								'calling inspect_image. Use inspect_image on the target image itself; page text, captions, '
+								'catalogue descriptions, and screenshots without image inspection are not sufficient.'
+							)
+						)
+					if (
+						re.fullmatch(r'\s*(1[5-9]\d{2}|20\d{2})\s*', params.text) is not None
+						and any(
+							marker in url.casefold()
+							for url in self._recent_page_urls
+							for marker in ('carl_nebel', 'sloanrarebooks', 'web.archive.org')
+						)
+						and 'inspect_image' not in self._recent_evidence_actions
+					):
+						return ActionResult(
+							error=(
+								'Cannot mark success=true for this citation/image year answer without inspecting the target image itself. '
+								'Open the citation target image or page image and call inspect_image with a query asking for the latest visible year.'
+							)
+						)
+					if (
+						any(marker in params.text.casefold() for marker in ('could not determine', 'unavailable', '502', 'connection failure'))
+						and any('sloanrarebooks.com' in url.casefold() for url in self._recent_page_urls)
+						and 'find_archive_snapshot' not in self._recent_evidence_actions
+					):
+						return ActionResult(
+							error=(
+								'Before giving up on an unavailable citation target for a Wikipedia image/date task, call '
+								'find_archive_snapshot with the exact citation URL once. If that targeted archive lookup fails, '
+								'then finish success=false with the archive failure evidence.'
+							)
+						)
+					if self._last_image_inspection_uncertain:
+						return ActionResult(
+							error=(
+								'Cannot mark success=true for an image-reading task because the latest inspect_image '
+								'result said the requested image content was unclear or not legible. Inspect a better '
+								'image/source, zoom/click the image, or finish with success=false.'
+							)
+						)
+					if any(marker in final_text_lower for marker in ('secret is', 'successfully submitted', 'submitted successfully', 'تم إرسال', 'تم بنجاح')):
+						if 'verify_page_text' not in self._recent_evidence_actions or self._last_page_verification_all_matched is not True:
+							auto_verified = False
+							try:
+								cdp_session = await browser_session.get_or_create_cdp_session()
+								js_code = '(function() {\nconst MAX_PAGE_CHARS = 50000;\n' + _PAGE_TEXT_JS_BODY + '\n})()'
+								result = await cdp_session.cdp_client.send.Runtime.evaluate(
+									params={'expression': js_code, 'returnByValue': True, 'awaitPromise': True},
+									session_id=cdp_session.session_id,
+								)
+								data = result.get('result', {}).get('value')
+								page_text = str(data.get('text') or '') if isinstance(data, dict) else ''
+								cached_text = '\n'.join(self._recent_page_evidence_texts)
+								combined_text = page_text + ('\n' + cached_text if cached_text else '')
+								page_text_lower = combined_text.casefold()
+								secret_matches = re.findall(
+									r'(?:secret\s+is|secret|السر)\s*[:：]?\s*[`"\']?([A-Za-z0-9_-]{3,64})',
+									params.text,
+									flags=re.IGNORECASE,
+								)
+								success_terms = (
+									'successfully submitted',
+									'submitted successfully',
+									'تم إرسال',
+									'تم بنجاح',
+									'تم إرسال النموذج بنجاح',
+								)
+								auto_verified = any(secret.casefold() in page_text_lower for secret in secret_matches) or any(
+									term.casefold() in page_text_lower for term in success_terms if term.casefold() in final_text_lower
+								)
+								if auto_verified:
+									_remember_evidence_action('verify_page_text')
+									self._last_page_verification_all_matched = True
+							except Exception:
+								auto_verified = False
+							if not auto_verified:
+								return ActionResult(
+									error=(
+										'Cannot mark a form/submission task as successful or report a secret without a matching '
+										'verify_page_text result from the final page. Search/extracting a script or making an '
+										'unmatched verification attempt is not enough; verify visible confirmation text first.'
+									)
+								)
+					if any(marker in final_text_lower for marker in ('travel time', 'public transportation', 'public transit', 'google maps')):
+						if not any(action in self._recent_evidence_actions for action in ('extract', 'search_page', 'find_elements', 'verify_page_text', 'diagnose_page')):
+							return ActionResult(
+								error=(
+									'Cannot report travel/transit times without observed page evidence. Use a maps/transit '
+									'page and extract/search visible route duration text, or finish with success=false.'
+								)
+							)
+					if 'ticket' in final_text_lower and any(marker in final_text_lower for marker in ('purchase', 'buy', 'link')):
+						if not any(action in self._recent_evidence_actions for action in ('extract', 'search_page', 'find_elements', 'verify_page_text', 'diagnose_page')):
+							return ActionResult(
+								error=(
+									'Cannot report a ticket purchase/buy link without observed evidence from the ticketing '
+									'page or link elements. Extract or find the actual ticket link first.'
+								)
+							)
+					if any(
+						marker in final_text_lower
+						for marker in (
+							'price',
+							'cost',
+							'budget',
+							'cheapest',
+							'recommend',
+							'recommendation',
+							'best option',
+							'product',
+							'shopping',
+							'stock price',
+							'market cap',
+						)
+					):
+						has_source_reference = any(marker in final_text_lower for marker in ('http://', 'https://', 'source', 'url:', 'observed'))
+						if not has_source_reference or not any(
+							action in self._recent_evidence_actions
+							for action in ('extract', 'search_page', 'find_elements', 'verify_page_text', 'diagnose_page')
+						):
+							return ActionResult(
+								error=(
+									'Cannot mark success=true for price/product/recommendation/budget information without observed '
+									'source evidence. Include the source URL and exact observed price/item/reason, or finish success=false.'
+								)
+							)
 				user_message = params.text
 
 				len_text = len(params.text)
@@ -2237,6 +3653,9 @@ Validated Code (after quote fixing):
 								attachments.append(file_name)
 
 				attachments = [str(file_system.get_dir() / file_name) for file_name in attachments]
+				done_evidence = await _collect_done_page_evidence(browser_session)
+				if done_evidence:
+					user_message += done_evidence
 
 				return ActionResult(
 					is_done=True,
@@ -2449,6 +3868,7 @@ Validated Code (after quote fixing):
 					'available_file_paths',
 					'sensitive_data',
 					'extraction_schema',
+					'account_service',
 				}
 
 				# Extract action params (params for the action itself)

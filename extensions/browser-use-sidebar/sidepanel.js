@@ -1,6 +1,8 @@
 const BRIDGE_URL = "http://127.0.0.1:8765";
 const OBSERVE_INTERVAL_MS = 8000;
 const RUN_TIMEOUT_MS = 300000;
+const JOB_POLL_INTERVAL_MS = 2000;
+const STATE_KEY = "browserUseSidepanelState";
 
 const els = {
   status: document.getElementById("status"),
@@ -12,6 +14,17 @@ const els = {
   autoObserve: document.getElementById("autoObserve"),
   autofillStatus: document.getElementById("autofillStatus"),
   autofill: document.getElementById("autofill"),
+  toggleAccountForm: document.getElementById("toggleAccountForm"),
+  accountForm: document.getElementById("accountForm"),
+  accountLabel: document.getElementById("accountLabel"),
+  accountUrl: document.getElementById("accountUrl"),
+  accountUsername: document.getElementById("accountUsername"),
+  accountPassword: document.getElementById("accountPassword"),
+  accountPhone: document.getElementById("accountPhone"),
+  passwordFields: document.getElementById("passwordFields"),
+  phoneFields: document.getElementById("phoneFields"),
+  accountFormStatus: document.getElementById("accountFormStatus"),
+  saveAccount: document.getElementById("saveAccount"),
   run: document.getElementById("run"),
   output: document.getElementById("output"),
   thinkingSection: document.getElementById("thinkingSection"),
@@ -24,6 +37,9 @@ let currentContext = null;
 let currentAutofillMatches = [];
 let observeTimer = null;
 let debounceTimer = null;
+let activeJobId = null;
+let jobPollTimer = null;
+let activeRunStartedAt = null;
 
 // --- Thinking Process Manager ---
 const thinking = {
@@ -33,39 +49,19 @@ const thinking = {
     els.thinkingTimeline.innerHTML = "";
     els.stepCounter.textContent = "Step 0";
     els.thinkingSection.style.display = "none";
+    persistState();
   },
   show() {
     els.thinkingSection.style.display = "";
   },
   addStep(step) {
     this.steps.push(step);
-    els.stepCounter.textContent = `Step ${this.steps.length}`;
-    const el = document.createElement("div");
-    el.className = "step-item";
-
-    const dotClass = step.status === "error" ? "error" : step.status === "running" ? "running" : "success";
-    el.innerHTML = `
-      <div class="step-dot ${dotClass}"></div>
-      <div class="step-content">
-        <div class="step-action">${this._escapeHtml(step.action || "thinking...")}</div>
-        ${step.detail ? `<div class="step-detail">${this._escapeHtml(step.detail)}</div>` : ""}
-        ${step.thinking ? `<div class="step-thinking">💭 ${this._escapeHtml(step.thinking)}</div>` : ""}
-      </div>
-    `;
-    els.thinkingTimeline.appendChild(el);
-    els.thinkingTimeline.scrollTop = els.thinkingTimeline.scrollHeight;
+    persistState();
+    renderThinking();
   },
-  updateLastStep(updates) {
-    if (!this.steps.length) return;
-    const last = this.steps[this.steps.length - 1];
-    Object.assign(last, updates);
-    const lastEl = els.thinkingTimeline.lastElementChild;
-    if (lastEl) {
-      const dot = lastEl.querySelector(".step-dot");
-      if (dot && updates.status) {
-        dot.className = `step-dot ${updates.status}`;
-      }
-    }
+  restore(steps) {
+    this.steps = Array.isArray(steps) ? steps : [];
+    renderThinking();
   },
   _escapeHtml(text) {
     const div = document.createElement("div");
@@ -73,6 +69,38 @@ const thinking = {
     return div.innerHTML;
   },
 };
+
+function renderThinking() {
+  els.thinkingTimeline.innerHTML = "";
+  els.stepCounter.textContent = `Step ${thinking.steps.length}`;
+  els.thinkingSection.style.display = thinking.steps.length ? "" : "none";
+  for (const step of thinking.steps) {
+    const el = document.createElement("div");
+    el.className = "step-item";
+
+    const dotClass = step.status === "error" ? "error" : step.status === "running" ? "running" : "success";
+    el.innerHTML = `
+      <div class="step-dot ${dotClass}"></div>
+      <div class="step-content">
+        <div class="step-action">${thinking._escapeHtml(step.action || "thinking...")}</div>
+        ${step.detail ? `<div class="step-detail">${thinking._escapeHtml(step.detail)}</div>` : ""}
+        ${step.thinking ? `<div class="step-thinking">💭 ${thinking._escapeHtml(step.thinking)}</div>` : ""}
+      </div>
+    `;
+    els.thinkingTimeline.appendChild(el);
+  }
+  els.thinkingTimeline.scrollTop = els.thinkingTimeline.scrollHeight;
+}
+
+Object.assign(thinking, {
+  updateLastStep(updates) {
+    if (!this.steps.length) return;
+    const last = this.steps[this.steps.length - 1];
+    Object.assign(last, updates);
+    persistState();
+    renderThinking();
+  },
+});
 
 // --- Page Context ---
 
@@ -147,6 +175,9 @@ function renderContext() {
   const url = currentContext.url || currentContext.browserUrl || "";
   els.pageTitle.textContent = title;
   els.pageUrl.textContent = url;
+  if (els.accountForm.hidden && /^https?:\/\//i.test(url)) {
+    els.accountUrl.value = url;
+  }
 }
 
 // --- Autofill ---
@@ -234,6 +265,72 @@ async function autofillCurrentPage() {
   return result;
 }
 
+function selectedLoginMethod() {
+  return document.querySelector('input[name="loginMethod"]:checked')?.value || "password";
+}
+
+function syncAccountFormMethod() {
+  const method = selectedLoginMethod();
+  els.passwordFields.hidden = method !== "password";
+  els.phoneFields.hidden = method !== "phone";
+}
+
+function toggleAccountForm() {
+  els.accountForm.hidden = !els.accountForm.hidden;
+  if (!els.accountForm.hidden) {
+    const url = currentContext?.url || currentContext?.browserUrl || "";
+    if (/^https?:\/\//i.test(url) && !els.accountUrl.value) {
+      els.accountUrl.value = url;
+    }
+    if (!els.accountLabel.value && currentContext?.title) {
+      els.accountLabel.value = currentContext.title.slice(0, 60);
+    }
+    els.accountFormStatus.textContent = "";
+    syncAccountFormMethod();
+    els.accountLabel.focus();
+  }
+}
+
+async function saveAccountProfile(event) {
+  event.preventDefault();
+  const method = selectedLoginMethod();
+  const payload = {
+    label: els.accountLabel.value.trim(),
+    url: els.accountUrl.value.trim(),
+    login_method: method,
+  };
+  if (method === "password") {
+    payload.username = els.accountUsername.value.trim();
+    payload.password = els.accountPassword.value;
+  } else {
+    payload.phone = els.accountPhone.value.trim();
+  }
+
+  els.saveAccount.disabled = true;
+  els.accountFormStatus.textContent = "Saving...";
+  try {
+    const response = await fetch(`${BRIDGE_URL}/autofill/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+    renderAutofill(data.matches || []);
+    els.accountFormStatus.textContent = "Saved.";
+    els.accountPassword.value = "";
+    els.accountPhone.value = "";
+    setTimeout(() => {
+      els.accountForm.hidden = true;
+      els.accountFormStatus.textContent = "";
+    }, 700);
+  } catch (error) {
+    els.accountFormStatus.textContent = String(error.message || error);
+  } finally {
+    els.saveAccount.disabled = false;
+  }
+}
+
 // --- Auto Observe ---
 
 function scheduleObserve() {
@@ -272,6 +369,59 @@ function formatDuration(ms) {
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
+function storageAvailable() {
+  return Boolean(chrome?.storage?.local);
+}
+
+function snapshotState(extra = {}) {
+  return {
+    task: els.task.value,
+    includePage: els.includePage.checked,
+    autoObserve: els.autoObserve.checked,
+    outputText: els.output.textContent,
+    outputClass: els.output.className,
+    resultTime: els.resultTime.textContent,
+    thinkingSteps: thinking.steps,
+    activeJobId,
+    activeRunStartedAt,
+    updatedAt: Date.now(),
+    ...extra,
+  };
+}
+
+async function persistState(extra = {}) {
+  if (!storageAvailable()) return;
+  try {
+    await chrome.storage.local.set({ [STATE_KEY]: snapshotState(extra) });
+  } catch {
+    // Best effort: UI should still work if extension storage is unavailable.
+  }
+}
+
+async function restoreState() {
+  if (!storageAvailable()) return;
+  try {
+    const stored = await chrome.storage.local.get(STATE_KEY);
+    const state = stored[STATE_KEY];
+    if (!state || typeof state !== "object") return;
+    els.task.value = state.task || "";
+    els.includePage.checked = state.includePage !== false;
+    els.autoObserve.checked = state.autoObserve !== false;
+    els.output.textContent = state.outputText || "Start the local bridge, then run a task.";
+    els.output.className = state.outputClass || "output-content";
+    els.resultTime.textContent = state.resultTime || "";
+    activeJobId = state.activeJobId || null;
+    activeRunStartedAt = state.activeRunStartedAt || null;
+    thinking.restore(state.thinkingSteps || []);
+    if (activeJobId) {
+      els.run.disabled = true;
+      startJobPolling(activeJobId);
+    }
+  } catch {
+    // Ignore corrupt or inaccessible storage.
+  }
+}
+
 // --- Bridge Check ---
 
 async function checkBridge() {
@@ -299,34 +449,23 @@ async function runTask() {
   els.output.className = "output-content";
   els.output.textContent = "";
   els.resultTime.textContent = "";
+  activeJobId = null;
+  activeRunStartedAt = Date.now();
 
   // Show thinking panel
   thinking.clear();
   thinking.show();
   thinking.addStep({ action: "Sending task to agent...", status: "running" });
 
-  const controller = new AbortController();
-  const startedAt = Date.now();
-  const timeoutId = setTimeout(() => controller.abort(), RUN_TIMEOUT_MS);
-
-  // Progress ticker
-  let progressStep = 0;
-  const progressId = setInterval(() => {
-    progressStep++;
-    const elapsed = formatDuration(Date.now() - startedAt);
-    thinking.updateLastStep({ detail: `waiting for response... (${elapsed})` });
-  }, 5000);
-
   try {
     const context = els.includePage.checked ? (currentContext || (await readPageContext())) : null;
 
     thinking.updateLastStep({ status: "success", action: "Task submitted", detail: task.slice(0, 80) });
-    thinking.addStep({ action: "Agent is browsing...", status: "running", thinking: "Analyzing task and planning steps" });
+    thinking.addStep({ action: "Working...", status: "running", thinking: "Choosing whether to answer from the page or browse" });
 
-    const response = await fetch(`${BRIDGE_URL}/assistant`, {
+    const response = await fetch(`${BRIDGE_URL}/assistant/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
       body: JSON.stringify({
         task,
         page_context: context,
@@ -339,59 +478,109 @@ async function runTask() {
 
     const data = await response.json();
     if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-
-    // Parse thinking steps from response
-    thinking.updateLastStep({ status: "success", action: "Agent completed" });
-
-    if (data.stage_results && data.stage_results.length > 0) {
-      for (const stage of data.stage_results) {
-        const source = stage.source || stage.source_type || "unknown";
-        const candidateCount = (stage.candidates || []).length;
-        thinking.addStep({
-          action: `📊 Gathered from ${source}`,
-          detail: `${candidateCount} candidate(s) found`,
-          status: "success",
-        });
-      }
-    }
-
-    if (data.task_plan) {
-      const plan = data.task_plan;
-      if (plan.mode) {
-        thinking.addStep({
-          action: `🎯 Mode: ${plan.mode}`,
-          detail: plan.topic || "",
-          thinking: plan.budget ? `Budget: ${plan.budget}` : null,
-          status: "success",
-        });
-      }
-    }
-
-    // Show result
-    const elapsed = formatDuration(Date.now() - startedAt);
-    els.resultTime.textContent = elapsed;
-    els.output.className = "output-content success";
-    els.output.textContent = data.result || JSON.stringify(data, null, 2);
-
+    activeJobId = data.job_id;
+    await persistState();
+    startJobPolling(activeJobId);
   } catch (error) {
-    const elapsed = formatDuration(Date.now() - startedAt);
+    const elapsed = formatDuration(Date.now() - activeRunStartedAt);
     els.resultTime.textContent = elapsed;
     thinking.updateLastStep({ status: "error", action: "Failed" });
     thinking.addStep({
       action: "❌ Error",
-      detail: error.name === "AbortError" ? "Timed out after 5 minutes" : error.message,
+      detail: error.message,
       status: "error",
     });
     els.output.className = "output-content error";
-    els.output.textContent =
-      error.name === "AbortError"
-        ? "Request timed out. Try a narrower task or restart the bridge."
-        : String(error.message || error);
+    els.output.textContent = String(error.message || error);
+    activeJobId = null;
+    await persistState();
   } finally {
-    clearTimeout(timeoutId);
-    clearInterval(progressId);
-    els.run.disabled = false;
+    if (!activeJobId) {
+      els.run.disabled = false;
+    }
   }
+}
+
+function startJobPolling(jobId) {
+  clearInterval(jobPollTimer);
+  pollJob(jobId);
+  jobPollTimer = setInterval(() => pollJob(jobId), JOB_POLL_INTERVAL_MS);
+}
+
+async function pollJob(jobId) {
+  if (!jobId || jobId !== activeJobId) return;
+  try {
+    const response = await fetch(`${BRIDGE_URL}/assistant/status/${encodeURIComponent(jobId)}`);
+    const job = await response.json();
+    if (!response.ok || job.error) {
+      if (job.status !== "failed") throw new Error(job.error || `HTTP ${response.status}`);
+    }
+
+    const elapsed = activeRunStartedAt ? formatDuration(Date.now() - activeRunStartedAt) : "";
+    els.resultTime.textContent = elapsed;
+
+    if (job.status === "running") {
+      thinking.updateLastStep({ detail: `waiting for response... (${elapsed})` });
+      await persistState();
+      return;
+    }
+
+    clearInterval(jobPollTimer);
+    jobPollTimer = null;
+
+    if (job.status === "completed") {
+      renderAssistantResult(job.result || {});
+      activeJobId = null;
+      activeRunStartedAt = null;
+      els.run.disabled = false;
+      await persistState();
+      return;
+    }
+
+    throw new Error(job.error || "Task failed");
+  } catch (error) {
+    clearInterval(jobPollTimer);
+    jobPollTimer = null;
+    activeJobId = null;
+    activeRunStartedAt = null;
+    thinking.updateLastStep({ status: "error", action: "Failed" });
+    thinking.addStep({ action: "❌ Error", detail: error.message, status: "error" });
+    els.output.className = "output-content error";
+    els.output.textContent = String(error.message || error);
+    els.run.disabled = false;
+    await persistState();
+  }
+}
+
+function renderAssistantResult(data) {
+  thinking.updateLastStep({ status: "success", action: "Agent completed" });
+
+  if (data.stage_results && data.stage_results.length > 0) {
+    for (const stage of data.stage_results) {
+      const source = stage.source || stage.source_type || "unknown";
+      const candidateCount = (stage.candidate_evidence || stage.candidates || []).length;
+      thinking.addStep({
+        action: `📊 Gathered from ${source}`,
+        detail: `${candidateCount} candidate(s) found`,
+        status: "success",
+      });
+    }
+  }
+
+  if (data.task_plan) {
+    const plan = data.task_plan;
+    if (plan.mode) {
+      thinking.addStep({
+        action: `🎯 Mode: ${plan.mode}`,
+        detail: plan.topic || "",
+        thinking: plan.budget ? `Budget: ${plan.budget}` : null,
+        status: "success",
+      });
+    }
+  }
+
+  els.output.className = "output-content success";
+  els.output.textContent = data.result || JSON.stringify(data, null, 2);
 }
 
 // --- Event Listeners ---
@@ -406,6 +595,14 @@ els.refresh.addEventListener("click", async () => {
 });
 
 els.autoObserve.addEventListener("change", startAutoObserve);
+els.includePage.addEventListener("change", () => persistState());
+els.autoObserve.addEventListener("change", () => persistState());
+els.task.addEventListener("input", () => persistState());
+els.toggleAccountForm.addEventListener("click", toggleAccountForm);
+els.accountForm.addEventListener("submit", saveAccountProfile);
+document.querySelectorAll('input[name="loginMethod"]').forEach((input) => {
+  input.addEventListener("change", syncAccountFormMethod);
+});
 
 els.autofill.addEventListener("click", async () => {
   els.autofill.disabled = true;
@@ -438,5 +635,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 });
 
 // --- Init ---
-checkBridge();
-startAutoObserve();
+async function init() {
+  await restoreState();
+  checkBridge();
+  syncAccountFormMethod();
+  startAutoObserve();
+}
+
+init();

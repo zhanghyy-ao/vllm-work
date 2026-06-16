@@ -52,6 +52,84 @@ class FindElementsAction(BaseModel):
 	include_text: bool = Field(default=True, description='Include text content of each element')
 
 
+class ExtractTableColumnAction(BaseModel):
+	"""Extract top rows from an HTML table column using deterministic DOM parsing."""
+
+	table_selector: str = Field(default='table', description='CSS selector for the table to inspect.')
+	column: str = Field(
+		description='Column header name or 1-based column number to extract, e.g. "Release", "Movie", "Title", or "2".',
+	)
+	limit: int = Field(default=10, ge=1, le=100, description='Maximum number of body rows to extract from the table.')
+	include_rows: bool = Field(default=True, description='Include compact row objects in addition to extracted values.')
+
+
+class VerifyPageTextAction(BaseModel):
+	"""Verify that required evidence is visible in the current page text."""
+
+	required_terms: list[str] = Field(
+		default_factory=list,
+		description='Literal terms that must appear in the visible page text. Use concrete confirmation words, secrets, names, prices, or values.',
+	)
+	regex_patterns: list[str] = Field(
+		default_factory=list,
+		description='Regex patterns that must match the visible page text. Use for numeric values, dates, IDs, or flexible confirmation messages.',
+	)
+	case_sensitive: bool = Field(default=False, description='Whether literal and regex matching is case-sensitive.')
+	context_chars: int = Field(default=180, description='Characters of surrounding page text to return for each match.')
+	max_page_chars: int = Field(default=50000, description='Maximum visible page text characters to inspect.')
+
+
+class ComputeOverlapAction(BaseModel):
+	"""Compute overlap/count between two extracted lists without relying on model mental arithmetic."""
+
+	list_a: list[str] = Field(description='First extracted list of item names or values.')
+	list_b: list[str] = Field(description='Second extracted list of item names or values.')
+	normalize: bool = Field(
+		default=True,
+		description='If true, compare case-insensitively after trimming whitespace and removing simple punctuation.',
+	)
+
+
+class InspectImageAction(BaseModel):
+	"""Inspect an image element or URL with the vision model."""
+
+	index: int | None = Field(
+		default=None,
+		description='Browser element index for an image/link element from browser_state. Prefer this when the target image is visible/clickable.',
+	)
+	selector: str | None = Field(
+		default=None,
+		description='CSS selector for the target image or containing element. Used if index is not available.',
+	)
+	image_url: str | None = Field(
+		default=None,
+		description='Direct image URL to inspect. Used if the image source was extracted from the page.',
+	)
+	query: str = Field(
+		description='Specific question about the image itself. Example: "What years are written in this image? Return only years visible in the image."',
+	)
+	full_page: bool = Field(
+		default=False,
+		description='If true, inspect a full-page screenshot instead of a single image/element. Use only when no image element or URL can be isolated.',
+	)
+
+
+class DiagnosePageAction(BaseModel):
+	"""Diagnose visible page state before deciding the next action."""
+
+	check_overlays: bool = Field(default=True, description='Detect visible modal/dialog/cookie/popup overlays.')
+	check_blockers: bool = Field(default=True, description='Detect captcha, bot checks, access denied, login walls, and region blocks.')
+	check_forms: bool = Field(default=True, description='Summarize visible forms, required fields, validation messages, and submit controls.')
+	max_text_chars: int = Field(default=12000, ge=1000, le=50000, description='Maximum visible text characters to inspect.')
+
+
+class FindArchiveSnapshotAction(BaseModel):
+	"""Find a single archived snapshot URL for an unavailable page."""
+
+	url: str = Field(description='Original URL to look up in the Internet Archive CDX API.')
+	timeout_seconds: float = Field(default=8.0, ge=1.0, le=20.0, description='Network timeout for the archive lookup.')
+
+
 class SearchAction(BaseModel):
 	query: str
 	engine: str = Field(
@@ -100,10 +178,20 @@ class DoneAction(BaseModel):
 			'Do NOT use training knowledge to fill gaps — if information was not found on the page, say so explicitly. '
 			'Do NOT claim completion of steps from compacted_memory or prior session summaries '
 			'unless you explicitly verified them yourself. '
-			'If uncertain whether a prior step completed, say so explicitly.'
+			'If uncertain whether a prior step completed, say so explicitly. '
+			'When success=true, include the concrete verification evidence you observed, such as a URL, page text, '
+			'confirmation message, extracted table/list values, or file content. For forms, purchases, ticketing, maps, '
+			'prices, rankings, and calculations, do not mark success=true unless the final page state or extracted '
+			'content confirms the requested result.'
 		)
 	)
-	success: bool = Field(default=True, description='True if user_request completed successfully')
+	success: bool = Field(
+		default=True,
+		description=(
+			'True only if the user_request was completed and verified from evidence observed in this browser session. '
+			'Use false when blocked, unsure, missing required data, or unable to verify submission/result.'
+		),
+	)
 	files_to_display: list[str] | None = Field(default=[])
 
 
@@ -120,8 +208,19 @@ def _hide_internal_fields_from_schema(schema: dict) -> None:
 class StructuredOutputAction(BaseModel, Generic[T]):
 	model_config = ConfigDict(json_schema_extra=_hide_internal_fields_from_schema)
 
-	success: bool = Field(default=True, description='True if user_request completed successfully')
-	data: T = Field(description='The actual output data matching the requested schema')
+	success: bool = Field(
+		default=True,
+		description=(
+			'True only if the user_request was completed and verified from evidence observed in this browser session. '
+			'Use false when blocked, unsure, missing required data, or unable to verify submission/result.'
+		),
+	)
+	data: T = Field(
+		description=(
+			'The actual output data matching the requested schema. Populate it only with values observed from '
+			'browser_state, tool outputs, screenshots, or files in this session; do not infer missing fields.'
+		)
+	)
 	files_to_display: list[str] | None = Field(default=[])
 
 
@@ -193,6 +292,21 @@ class UseAccountAction(BaseModel):
 	model_config = ConfigDict(extra='ignore')
 
 	label: str = Field(description='Account label or platform name (e.g. "my github", "淘宝账号", "taobao")')
+
+
+class AutoFillLoginAction(BaseModel):
+	"""Automatically fill visible login fields with a matching stored account."""
+
+	model_config = ConfigDict(extra='ignore')
+
+	label: str | None = Field(
+		default=None,
+		description='Optional account label or platform name. If omitted, the current page URL is used to find a matching account.',
+	)
+	submit: bool = Field(
+		default=False,
+		description='Click a detected login/submit button after filling. Defaults to false so the agent can inspect the result first.',
+	)
 
 
 class GitHubNavigateAction(BaseModel):

@@ -45,6 +45,56 @@ class DOMWatchdog(BaseWatchdog):
 	# Network tracking - maps request_id to (url, start_time, method, resource_type)
 	_pending_requests: dict[str, tuple[str, float, str, str | None]] = {}
 
+	def _fallback_page_info(self) -> 'PageInfo':
+		"""Return a safe viewport-sized PageInfo when CDP page metrics are unavailable."""
+		from browser_use.browser.views import PageInfo
+
+		viewport = self.browser_session.browser_profile.viewport or {'width': 1280, 'height': 720}
+		return PageInfo(
+			viewport_width=viewport['width'],
+			viewport_height=viewport['height'],
+			page_width=viewport['width'],
+			page_height=viewport['height'],
+			scroll_x=0,
+			scroll_y=0,
+			pixels_above=0,
+			pixels_below=0,
+			pixels_left=0,
+			pixels_right=0,
+		)
+
+	def _minimal_browser_state(
+		self,
+		*,
+		url: str,
+		title: str = 'Page',
+		tabs: list | None = None,
+		error: str | None = None,
+		include_recent_events: bool = False,
+		pending_requests: list | None = None,
+	) -> 'BrowserStateSummary':
+		"""Build a minimal BrowserStateSummary so slow pages do not consume the full event timeout."""
+		from browser_use.browser.views import BrowserStateSummary
+
+		cached_state = self.browser_session._cached_browser_state_summary
+		dom_state = cached_state.dom_state if cached_state and cached_state.dom_state else SerializedDOMState(_root=None, selector_map={})
+		return BrowserStateSummary(
+			dom_state=dom_state,
+			url=url,
+			title=title,
+			tabs=tabs or [],
+			screenshot=None,
+			page_info=self._fallback_page_info(),
+			pixels_above=0,
+			pixels_below=0,
+			browser_errors=[error] if error else [],
+			is_pdf_viewer=url.endswith('.pdf') or '/pdf/' in url,
+			recent_events=self._get_recent_events_str() if include_recent_events else None,
+			pending_network_requests=pending_requests or [],
+			pagination_buttons=[],
+			closed_popup_messages=self.browser_session._closed_popup_messages.copy(),
+		)
+
 	async def on_TabCreatedEvent(self, event: TabCreatedEvent) -> None:
 		# self.logger.debug('Setting up init scripts in browser')
 		return None
@@ -292,7 +342,11 @@ class DOMWatchdog(BaseWatchdog):
 
 		# Get tabs info once at the beginning for all paths
 		self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: Getting tabs info...')
-		tabs_info = await self.browser_session.get_tabs()
+		try:
+			tabs_info = await asyncio.wait_for(self.browser_session.get_tabs(), timeout=2.0)
+		except Exception as e:
+			self.logger.warning(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: get_tabs timed out/failed: {e}')
+			tabs_info = []
 		self.logger.debug(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Got {len(tabs_info)} tabs')
 		self.logger.debug(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Tabs info: {tabs_info}')
 
@@ -318,23 +372,10 @@ class DOMWatchdog(BaseWatchdog):
 
 				# Try to get page info from CDP, fall back to defaults if unavailable
 				try:
-					page_info = await self._get_page_info()
+					page_info = await asyncio.wait_for(self._get_page_info(), timeout=1.0)
 				except Exception as e:
 					self.logger.debug(f'Failed to get page info from CDP for empty page: {e}, using fallback')
-					# Use default viewport dimensions
-					viewport = self.browser_session.browser_profile.viewport or {'width': 1280, 'height': 720}
-					page_info = PageInfo(
-						viewport_width=viewport['width'],
-						viewport_height=viewport['height'],
-						page_width=viewport['width'],
-						page_height=viewport['height'],
-						scroll_x=0,
-						scroll_y=0,
-						pixels_above=0,
-						pixels_below=0,
-						pixels_left=0,
-						pixels_right=0,
-					)
+					page_info = self._fallback_page_info()
 
 				return BrowserStateSummary(
 					dom_state=content,
@@ -390,8 +431,19 @@ class DOMWatchdog(BaseWatchdog):
 
 			if dom_task:
 				try:
-					content = await dom_task
+					content = await asyncio.wait_for(dom_task, timeout=8.0)
 					self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: ✅ DOM tree build completed')
+				except TimeoutError:
+					self.logger.warning(
+						'🔍 DOMWatchdog.on_BrowserStateRequestEvent: DOM build timed out after 8s, using cached/minimal state'
+					)
+					dom_task.cancel()
+					content = (
+						self.browser_session._cached_browser_state_summary.dom_state
+						if self.browser_session._cached_browser_state_summary
+						and self.browser_session._cached_browser_state_summary.dom_state
+						else SerializedDOMState(_root=None, selector_map={})
+					)
 				except Exception as e:
 					self.logger.warning(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: DOM build failed: {e}, using minimal state')
 					content = SerializedDOMState(_root=None, selector_map={})
@@ -400,8 +452,12 @@ class DOMWatchdog(BaseWatchdog):
 
 			if screenshot_task:
 				try:
-					screenshot_b64 = await screenshot_task
+					screenshot_b64 = await asyncio.wait_for(screenshot_task, timeout=6.0)
 					self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: ✅ Clean screenshot captured')
+				except TimeoutError:
+					self.logger.warning('🔍 DOMWatchdog.on_BrowserStateRequestEvent: Clean screenshot timed out after 6s')
+					screenshot_task.cancel()
+					screenshot_b64 = None
 				except Exception as e:
 					self.logger.warning(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Clean screenshot failed: {e}')
 					screenshot_b64 = None
@@ -441,20 +497,7 @@ class DOMWatchdog(BaseWatchdog):
 				self.logger.debug(
 					f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Failed to get page info from CDP: {e}, using fallback'
 				)
-				# Fallback to default viewport dimensions
-				viewport = self.browser_session.browser_profile.viewport or {'width': 1280, 'height': 720}
-				page_info = PageInfo(
-					viewport_width=viewport['width'],
-					viewport_height=viewport['height'],
-					page_width=viewport['width'],
-					page_height=viewport['height'],
-					scroll_x=0,
-					scroll_y=0,
-					pixels_above=0,
-					pixels_below=0,
-					pixels_left=0,
-					pixels_right=0,
-				)
+				page_info = self._fallback_page_info()
 
 			# Check for PDF viewer
 			is_pdf_viewer = page_url.endswith('.pdf') or '/pdf/' in page_url
@@ -505,34 +548,12 @@ class DOMWatchdog(BaseWatchdog):
 			self.logger.error(f'Failed to get browser state: {e}')
 
 			# Return minimal recovery state
-			return BrowserStateSummary(
-				dom_state=SerializedDOMState(_root=None, selector_map={}),
+			return self._minimal_browser_state(
 				url=page_url if 'page_url' in locals() else '',
 				title='Error',
 				tabs=[],
-				screenshot=None,
-				page_info=PageInfo(
-					viewport_width=1280,
-					viewport_height=720,
-					page_width=1280,
-					page_height=720,
-					scroll_x=0,
-					scroll_y=0,
-					pixels_above=0,
-					pixels_below=0,
-					pixels_left=0,
-					pixels_right=0,
-				),
-				pixels_above=0,
-				pixels_below=0,
-				browser_errors=[str(e)],
-				is_pdf_viewer=False,
-				recent_events=None,
-				pending_network_requests=[],  # Error state has no pending requests
-				pagination_buttons=[],  # Error state has no pagination
-				closed_popup_messages=self.browser_session._closed_popup_messages.copy()
-				if hasattr(self, 'browser_session') and self.browser_session is not None
-				else [],
+				error=str(e),
+				include_recent_events=False,
 			)
 
 	@time_execution_async('build_dom_tree_without_highlights')
